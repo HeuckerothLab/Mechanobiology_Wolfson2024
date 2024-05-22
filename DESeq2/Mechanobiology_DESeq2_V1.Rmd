@@ -1,0 +1,361 @@
+---
+title: "Heuckeroth-Wolfson Mechanobiology"
+subtitle: "Unaligned samples, loaded v. unloaded"
+author: Katherine Beigel, Deanne Taylor
+date: 5/8/24
+---
+
+```{r Setup}
+
+library(DESeq2)
+library(WGCNA)
+library(vsn)
+library(sva)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(RColorBrewer)
+library(EnhancedVolcano)
+library(reshape2)
+library(tidyr)
+library(viridis)
+library(svglite)
+library(tidyverse)
+
+renv::snapshot()
+
+```
+
+
+```{r Directory paths}
+
+version = "V1"
+
+rdatadir <- "Heuckeroth_3Mar23_RNASeq_Results/"
+
+outputdir <- "output/"
+
+```
+
+
+``` {r Load data}
+
+# RSEM count file from nf-core/rnaseq: genes (rows) x samples (col), counts rounded to integers
+countdata <- round(read.table(paste0(rdatadir, "Heuckeroth_3Mar23_RNASeq_RSEM_counts.tsv")))
+sample_order <- as.vector(colnames(countdata))
+
+# Read in matrix of experiment design/metadata.
+coldata <- read.table("metadata/mechanobiology_metadata.csv", header = TRUE, sep = ",")
+coldata <- coldata[match(sample_order, coldata$sample),]
+rownames(coldata) <- coldata[,1]
+coldata <- subset(coldata, select = -c(1))
+
+# Integers, characters, etc need to be converted to factors.
+coldata[sapply(coldata, is.character)] <- lapply(coldata[sapply(coldata, is.character)], as.factor)
+coldata$load_state <- relevel(coldata$load_state, ref = "unloaded")
+
+```
+
+
+```{r Pre-filtering}
+
+# Filter samples and genes with too many missing entries (WGCNA)
+good <- goodSamplesGenes(t(countdata)) # transpose, need samples x genes
+countmat.filt <- countdata[good$goodGenes,]
+
+# Filter cm for genes (rows) that have greater than 50 counts across all samples
+cm.filt <- countmat.filt[which(rowSums(countmat.filt) > 50), ]
+```
+
+``` {r Write count CSV (not required)}
+write.csv(cm.filt, file = paste0(outputdir, "CSV_", version, "/", "Mechanobio_Align-loaded_v_unloaded_FilteredCountMatrix_", version, ".csv"))
+```
+
+```{r DESeq2}
+
+cm.filt = read_csv(file = paste0(outputdir, "CSV_", version, "/", "Mechanobio_Align-loaded_v_unloaded_FilteredCountMatrix_", version, ".csv")) %>%
+  column_to_rownames('...1')
+
+# Design formula
+design_formula <- ~ load_state
+
+# Make DESeq data set from the filtered count matrix
+dds <- DESeqDataSetFromMatrix(countData = cm.filt, colData = coldata, design = design_formula)
+
+# DESeq2 variance stabilizing transformation
+vsd <- vst(dds, blind = FALSE)
+ntd <- normTransform(dds)
+# rld <- rlog(dds, blind = FALSE) #rld() can be used if vst() doesn't look good
+  
+# Estimate size factors to account for sequencing depth
+dds <- estimateSizeFactors(dds)
+
+# Run differential expression pipeline on the raw counts
+dds <- DESeq(dds)
+
+# Produce results table by specifying the contrast
+res_Unshrunk <- results(dds, contrast = c("load_state", "loaded", "unloaded"))
+
+# Order based on adjusted pvalue (pdj)
+resOrdered_Unshrunk <- res_Unshrunk[order(res_Unshrunk$padj),]
+
+# Make a dataframe to write to file
+resOrdered_Unshrunk_DF <- as.data.frame(resOrdered_Unshrunk)[1:nrow(resOrdered_Unshrunk), ]
+
+
+# Shrink the LFC estimates (effect size) for visualization and ranking of genes
+res <- lfcShrink(dds, coef = "load_state_loaded_vs_unloaded", type = "apeglm")
+
+# Order based on adjusted pvalue (pdj)
+resOrdered <- res[order(res$padj),]
+
+# Make a dataframe to write to file
+resOrderedDF <- as.data.frame(resOrdered)[1:nrow(resOrdered), ]
+
+```
+
+``` {r Write CSV}
+# write to file (.csv)
+write.csv(resOrdered_Unshrunk_DF, file = paste0(outputdir, "CSV_", version, "/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_Results-UnshrunkLFC_", version, ".csv"))
+
+# write to file (.csv)
+write.csv(resOrderedDF, file = paste0(outputdir, "CSV_", version, "/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_Results_", version, ".csv"))
+
+```
+
+``` {r Plotting unshrunken vs. lfcShrink}
+
+plotMA(res, ylim=c(-10,10))
+
+plotMA(resLFC, ylim=c(-10, 10))
+
+```
+
+``` {r Plotting sample comparisons}
+
+# Assess similarity between samples (Euclidean distance of variance stabilizing transformation)
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(dds@colData@rownames)
+colnames(sampleDistMatrix) <- paste(dds@colData@rownames)
+
+# HEATMAP of sample-to-sample Distances
+anno_samples <- as.data.frame(coldata$load_state)
+rownames(anno_samples) <- rownames(coldata)
+colnames(anno_samples) <- c("load_state")
+
+print(phmap_samp <- pheatmap(sampleDistMatrix,
+                             annotation_col = anno_samples,
+                             col = colorRampPalette(rev(brewer.pal(9, "Blues")))(255),
+                             cellwidth = 50,
+                             cellheight = 50,
+                             cluster_cols = TRUE,
+                             cluster_rows = TRUE,
+                             border_color = NA,
+                             main = paste("\n", "Sample-to-sample distances (VST values)", "\n", "Align samples, loaded vs. unloaded", "\n")))
+
+
+# PCA PLOT using VST values
+pcaData <- plotPCA(vsd, intgroup = c("load_state"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+
+# PDF file of PCA only
+
+# PCA PLOT using VST values
+pca_plot = ggplot(pcaData, aes(x = PC1,
+                               y = PC2,
+                               color = load_state,
+                               # label = rownames(pcaData)
+                               )) +
+  geom_point(size = 5) +
+  theme(axis.text.x = element_text(size = 13),
+        axis.text.y = element_text(size = 13),
+        axis.title.x = element_text(size = 15, face = "bold"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        legen) +
+  # geom_text(nudge_x = -1, nudge_y = -0.5, size = 3) +
+  # geom_text_repel() +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D")) +
+  coord_fixed() +
+  theme(aspect.ratio = 1) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.title = element_text(face = "bold")) +
+  guides(color = guide_legend(title = "Load state")) +
+  ggtitle(paste("\n", "PCA with VST values", "\n", "Align samples, Loaded vs. Unloaded"))
+
+pdf(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, ".pdf"), width = 11, height = 8.5)
+pca_plot
+dev.off()
+
+png(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, ".png"), width = 11, height = 8.5, res = 600, units = "in")
+pca_plot
+dev.off()
+
+tiff(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, ".tif"), width = 11, height = 8.5, res = 600, units = "in")
+pca_plot
+dev.off()
+
+svg(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, ".svg"), width = 11, height = 8.5)
+pca_plot
+dev.off()
+
+# PCA PLOT using VST values
+pca = ggplot(pcaData, aes(x = PC1, y = PC2, color = load_state, label = rownames(pcaData))) +
+  geom_point(size = 5) +
+  geom_text(nudge_x = -1, nudge_y = -1, size = 5) +
+  # geom_text_repel() +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D")) +
+  coord_fixed() +
+  theme(aspect.ratio = 1) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12, face="bold")) +
+  guides(color = guide_legend(title = "Load state"))
+pca
+
+# PDF file
+pdf(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-1.pdf"), width = 7, height = 7)
+pca
+dev.off()
+
+png(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-1.png"), width = 7, height = 7, res = 600, units = "in")
+pca
+dev.off()
+
+tiff(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-1.tif"), width = 7, height = 7, res = 600, units = "in")
+pca
+dev.off()
+
+svg(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-1.svg"), width = 7, height = 7)
+pca
+dev.off()
+
+# PCA PLOT using VST values
+pca = ggplot(pcaData, aes(x = PC1, y = PC2, color = load_state, label = rownames(pcaData))) +
+  geom_point(size = 6) +
+  geom_text(nudge_x = -1, nudge_y = -1, size = 5) +
+  # geom_text_repel() +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values = c("#2f6bc1", "#ff9d33")) +
+  coord_fixed() +
+  theme(aspect.ratio = 1) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12, face="bold")) +
+  guides(color = guide_legend(title = "Load state"))
+pca
+
+# PDF file
+pdf(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-2.pdf"), width = 7, height = 7)
+pca
+dev.off()
+
+png(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-2.png"), width = 7, height = 7, res = 600, units = "in")
+pca
+dev.off()
+
+# tiff(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-2.tif"), width = 7, height = 7, res = 600, units = "in")
+# pca
+# dev.off()
+
+svg(file = paste0(outputdir, "PDFs_", version, "/", "Mechanobio_Align-loaded_v_unloaded_PCA_", version, "-2.svg"), width = 7, height = 7)
+pca
+dev.off()
+
+```
+
+
+``` {r Plotting DEG volcano}
+
+################################################################################################
+
+
+# create custom key-value pairs for 'high', 'low', 'mid' expression by fold-change
+# this can be achieved with nested ifelse statements
+keyvals <- ifelse(
+  custom_res$log2FoldChange < -0.48 & custom_res$padj < 0.05, '#1157c3',
+  ifelse(custom_res$log2FoldChange > 0.48 & custom_res$padj < 0.05, '#ff9412',
+         'gray60'))
+keyvals[is.na(keyvals)] <- 'gray60'
+names(keyvals)[keyvals == '#1157c3'] <- 'down'
+names(keyvals)[keyvals == '#ff9412'] <- 'up'
+
+# Volcano plot of differential expression
+vol <- print(
+  (EnhancedVolcano(custom_res,
+                   lab = rownames(custom_res),
+                   x = 'log2FoldChange',
+                   y = 'padj',
+                   
+                   colCustom = keyvals,
+                   selectLab = vol_labs,
+                   colAlpha = 0.8,
+                   boxedLabels = TRUE,
+                   # labFace = 'bold',
+                   
+                   pointSize = 3,
+                   labSize = 5,
+                   
+                   pCutoff = 0.05,
+                   FCcutoff = 0.48,
+                   
+                   legendPosition = 'top',
+                   legendLabSize = 10,
+                   legendIconSize = 2,
+                   
+                   drawConnectors = TRUE,
+                   widthConnectors = 0.4,
+                   arrowheads = FALSE,
+                   
+                   ylim = c(0, 300),
+                   xlim = c(-8, 8),
+                   
+                   max.overlaps = 10,
+                   
+                   # title = paste("Volcano plot of differential expression - Mechanobiology Data"),
+                   # subtitle = paste("Align samples | loaded (3%, 1Hz) vs. unloaded (control)"),
+                   # caption = "log2FC cutoff, 0.48; FDR cutoff, 0.05")
+  ) +
+    annotate(geom = "text", x = -4, y = 300,
+             label = "Lower in stretched than in unstretched",
+             color="black", fontface = "bold", size = 6) +
+    annotate(geom = "text", x = 4, y = 300,
+             label = "Higher in stretched than in unstretched",
+             color="black", fontface = "bold", size = 6)) +
+  theme(plot.title = element_blank(),
+        plot.subtitle = element_blank(),
+        plot.caption = element_blank()) +
+    NoLegend()
+)
+
+cvdPlot(vol)
+
+pdf(file = paste0(outputdir, "PDFs_", version, "-5/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_VolcanoPlot_", version, "-5.pdf"), width = 14, height = 10)
+print(vol)
+dev.off()
+
+
+svglite(file = paste0(outputdir, "PDFs_", version, "-5/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_VolcanoPlot_", version, "-5.svg"), width = 14, height = 10, fix_text_size = FALSE)
+print(vol)
+dev.off()
+
+
+png(file = paste0(outputdir, "PDFs_", version, "-5/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_VolcanoPlot_", version, "-5.png"), width = 14, height = 10, 
+    res = 600, unit = 'in')
+print(vol)
+dev.off()
+
+
+
+```
+
