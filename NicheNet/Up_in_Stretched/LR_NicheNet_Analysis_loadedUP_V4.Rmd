@@ -1,0 +1,61 @@
+---
+title: "Heuckeroth-Wolfson Mechanobiology V4"
+subtitle: "Ligand-receptor analysis - NicheNet for genes UP in Stretched/Loaded smooth muscle cells"
+author: Katherine Beigel
+date: "5/8/2024"
+editor_options: 
+  chunk_output_type: console
+---
+    
+```{r Setup}
+
+library("Matrix")
+library("nichenetr")
+library(Seurat)
+# library(OmnipathR)
+
+library(tidyverse)
+library(mgsub)
+library(gsubfn)
+
+library(circlize)
+library(svglite)
+library(ggplot2)
+
+library(ggalluvial)
+library(ggrepel)
+library(networkD3)
+library(htmltools)
+library(htmlwidgets)
+
+#####
+# https://workflows.omnipathdb.org/nichenet1.html
+library(igraph)
+
+# devtools::install_github("davidsjoberg/ggsankey")
+library(networkD3)
+
+# https://github.com/fbreitwieser/sankeyD3/
+# remotes::install_github("fbreitwieser/sankeyD3")
+library(sankeyD3)
+library(htmlwidgets)
+library(alluvial)
+
+```
+
+# Set up project information
+
+## Main information to go in file names, etc.
+
+```{r set project}
+
+proj <- "loaded"
+proj_long <- "Up_in_Stretched"
+
+version <- "V4"
+version_load <- "V1"
+
+# need to load the SMC receiver cell types from V2
+version_load_SMCs = "V2"
+
+```
