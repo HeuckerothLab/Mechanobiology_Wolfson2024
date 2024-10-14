@@ -2,17 +2,18 @@
 title: "Heuckeroth-Wolfson Mechanobiology V4"
 subtitle: "Ligand-receptor analysis - NicheNet for genes UP in Stretched/Loaded smooth muscle cells"
 author: Katherine Beigel
-date: "5/8/2024"
+date: 5/8/2024
 editor_options: 
   chunk_output_type: console
 ---
-    
+
 ```{r Setup}
 
-library("Matrix")
-library("nichenetr")
+library(Matrix)
+
+# devtools::install_github("saeyslab/nichenetr")
+library(nichenetr)
 library(Seurat)
-# library(OmnipathR)
 
 library(tidyverse)
 library(mgsub)
@@ -41,7 +42,10 @@ library(sankeyD3)
 library(htmlwidgets)
 library(alluvial)
 
+renv::snapshot()
+
 ```
+
 
 # Set up project information
 
@@ -49,13 +53,1146 @@ library(alluvial)
 
 ```{r set project}
 
-proj <- "loaded"
-proj_long <- "Up_in_Stretched"
+proj = "loaded"
+proj_long = "Up_in_Stretched"
 
-version <- "V4"
-version_load <- "V1"
+# Version of this analysis
+version = "V4"
 
-# need to load the SMC receiver cell types from V2
+# Which version of the SETUP files to load for all cells EXCEPT SMCs?
+version_load = "V1"
+
+# Load the SMC receiver cell types from SETUP V2
 version_load_SMCs = "V2"
+
+```
+
+
+## Directories for loading and saving
+
+```{r Directories}
+
+# Where to save seurat object of scRNA data
+scdata_dir = "data/drokhlyansky/"
+
+# Directory for NicheNet prior data (the models that NicheNet uses for ligand-receptor and ligand-target analyses)
+nnetdata_dir = "data/nichenet/"
+
+# Directory for output
+datadir = "data/mechanobiology/"
+
+# Directory for output
+outdir = "output/"
+
+```
+
+
+### Create subdirectories for output if they do not yet exist
+
+```{r Check if ouput dirs exist; if not, create}
+
+dirs = c("sender_expressed_ligands", "ligand_activity",
+          "receiver_geneset_oi/V4", "receiver_expressed_receptors/V4",
+          "ligand-receptor_network_expressed/V4", "ligand_activity/V4",
+          "ligand-receptor_results/V4", "ligand-receptor_results/V4/heatmaps",
+          "ligand-target_results/V4", "ligand-target_results/V4/heatmaps",
+          "inferred_signaling_network")
+
+for (i in 1:length(dirs)){
+  if (!dir.exists(file.path(paste0(outdir, dirs[i], "/"),  fsep="/"))) {
+    dir.create(file.path(paste0(outdir, dirs[i], "/"),  fsep="/"))
+    print(paste0(dirs[i], " created"))
+  } else {
+    print(paste0(dirs[i], " exists"))
+  }
+}
+
+
+```
+
+
+# NicheNet prior model v2
+
+## Download files if needed from NicheNet's Zenodo page
+
+```{bash}
+# Updated model as of June 2023, downloaded here
+# Downloaded with wget and saved in data/nichenet_prior_model_V2 (the files are large, wouldn't download with readRDS(url()) )
+# https://zenodo.org/records/7074291
+
+cd ../data/nichenet_priot_model_V2/
+
+# lr_network
+wget https://zenodo.org/record/7074291/files/lr_network_human_21122021.rds
+
+# ligand_target_matrix
+wget https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final.rds
+
+# weighted_networks
+wget https://zenodo.org/record/7074291/files/weighted_networks_nsga2r_final.rds
+
+
+# For constructing ligant-to-target signaling paths
+# sig_network
+wget https://zenodo.org/record/7074291/files/signaling_network_human_21122021.rds
+
+# gr_network
+wget https://zenodo.org/record/7074291/files/gr_network_human_21122021.rds
+
+# ligand_tf_matrix
+wget https://zenodo.org/records/7074291/files/ligand_tf_matrix_nsga2r_final.rds
+
+
+```
+
+
+## Load in NicheNet prior model files and modifiy the model (first time)
+
+```{r Load NicheNet priors}
+# https://github.com/saeyslab/nichenetr/blob/master/vignettes/ligand_activity_geneset.md
+
+# Load NicheNet pre-built prior model
+# https://zenodo.org/records/7074291
+
+# Ligands are columns and receptors are rows; each cell gives the 'prior potential'
+# that a particular ligand might regulate the expression of a specific target gene
+# Values are Pearson correlation coefficient of ligand to predict target genes
+ligand_target_matrix = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2/", "ligand_target_matrix_nsga2r_final.rds"))
+
+# Note: the plan was to filter PPI interactions, which are not present in the lr_network in the NN V2. 
+# All LR interactions are now from omnipath and nichenet_verschueren
+# Load NicheNet network of putative ligand-receptor links
+lr_network_orig = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2/", "lr_network_human_21122021.rds"))
+
+# There are some weird LR relationships in the new network that appear to have receptors as ligands. This was not a problem in the original model,
+# so let use that to filter the LR_network
+lr_network_orig_V1 = readRDS(paste0(nnetdata_dir, "nichenet_prior_model/", "lr_network.rds")) %>% filter(!database %in% c("ppi_prediction", "ppi_prediction_go"))
+
+weighted_networks_orig = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2/", "weighted_networks_nsga2r_final.rds"))
+weighted_networks_orig_lr = weighted_networks_orig$lr_sig %>%
+  # inner_join only keep observations from x that have a matching key in y, distinct keeps only unique rows
+  inner_join(lr_network %>% distinct(from, to), by = c("from", "to")) # interactions and their weights in the ligand-receptor + signaling network
+
+
+sig_network_orig = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2/", "signaling_network_human_21122021.rds"))
+gr_network_orig = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2/", "gr_network_human_21122021.rds"))
+
+# This is the default ligand_tf_matrix but we'll construct another one in the next code block
+# since were are customizing the weighted_network
+# ligand_tf_matrix = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2/", "ligand_tf_matrix_nsga2r_final.rds"))
+
+```
+
+```{r Keep only certain data sources}
+
+# See the db types
+annotation_data_sources$type_db %>% unique()
+
+# What databases and sources are present if we just use literature and comprehensive_db?
+annotation_data_sources %>% filter(type_db %in% c("literature", "comprehensive_db"))
+
+# Define which data sources we want to keep
+data_sources_to_keep = annotation_data_sources %>% filter(type_db %in% c("literature", "comprehensive_db")) %>% pull(source)
+
+# filter the list of source weights for only the sources we want to keep
+new_source_weights_df = source_weights_df %>% filter(source %in% data_sources_to_keep)
+
+# Construct new lr_network
+# Technically I think this will be the same as we are not removing the sources that are used in this model
+new_lr_network = lr_network_orig %>% filter(source %in% data_sources_to_keep) %>% filter(from %in% lr_network_orig_V1$from)
+
+# MAIN NETWORKS
+lr_network = new_lr_network %>% distinct(from, to)
+sig_network = sig_network_orig %>% filter(source %in% data_sources_to_keep)
+gr_network = gr_network_orig %>% filter(source %in% data_sources_to_keep)
+
+saveRDS(lr_network, paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "lr_network_modified_", version, ".rds"))
+saveRDS(sig_network, paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "sig_network_modified_", version, ".rds"))
+saveRDS(gr_network, paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "gr_network_modified_", version, ".rds"))
+
+
+# aggregate the individual data sources in a weighted manner to obtain a weighted integrated signaling network
+weighted_networks = construct_weighted_networks(lr_network = new_lr_network, # need the object with the data sources
+                                                sig_network = sig_network,
+                                                gr_network = gr_network,
+                                                source_weights_df = new_source_weights_df)
+
+# downweigh the importance of signaling and gene regulatory hubs - use the optimized parameters of this
+weighted_networks = apply_hub_corrections(weighted_networks = weighted_networks,
+                                          lr_sig_hub = hyperparameter_list %>% filter(parameter == "lr_sig_hub") %>% pull(avg_weight),
+                                          gr_hub = hyperparameter_list %>% filter(parameter == "gr_hub") %>% pull(avg_weight))
+
+saveRDS(weighted_networks, paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "weighted_networks_modified_", version, ".rds"))
+
+weighted_networks = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "weighted_networks_modified_", version, ".rds"))
+
+weighted_networks_lr = weighted_networks$lr_sig %>%
+  # inner_join only keep observations from x that have a matching key in y, distinct keeps only unique rows
+  inner_join(lr_network %>% distinct(from, to), by = c("from", "to")) # interactions and their weights in the ligand-receptor + signaling network
+
+# Construct new ligand_target_matrix from new weighted network
+ligand_target_matrix = construct_ligand_target_matrix(weighted_networks = weighted_networks,
+                                                      ligands = (lr_network$from %>% unique() %>% as.list()), algorithm = "PPR",
+                                                      damping_factor = hyperparameter_list %>% filter(parameter == "damping_factor") %>% pull(avg_weight),
+                                                      ltf_cutoff = hyperparameter_list %>% filter(parameter == "ltf_cutoff") %>% pull(avg_weight))
+
+saveRDS(ligand_target_matrix, file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_target_matrix_modified_", version, ".rds"))
+
+ligand_target_matrix = readRDS(file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_target_matrix_modified_", version, ".rds"))
+
+
+# Construct new ligand_tf_matrix from new weighted network
+ligand_tf_matrix = construct_ligand_tf_matrix(weighted_networks,
+                                              (lr_network$from %>% unique() %>% as.list()),
+                                              ltf_cutoff = 0.99, algorithm = "PPR", damping_factor = 0.5, ligands_as_cols = TRUE)
+
+saveRDS(ligand_tf_matrix, file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/",  "ligand_tf_matrix_modified_", version, ".rds"))
+
+ligand_tf_matrix = readRDS(file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_tf_matrix_modified_", version, ".rds"))
+
+
+
+```
+
+## Load in the modified model (after the first time)
+
+```{r Load in modified model}
+
+lr_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "lr_network_modified_", version, ".rds"))
+sig_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "sig_network_modified_", version, ".rds"))
+gr_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "gr_network_modified_", version, ".rds"))
+
+weighted_networks = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "weighted_networks_modified_", version, ".rds"))
+ligand_target_matrix = readRDS(file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_target_matrix_modified_", version, ".rds"))
+ligand_tf_matrix = readRDS(file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_tf_matrix_modified_", version, ".rds"))
+
+weighted_networks_lr = weighted_networks$lr_sig %>%
+  # inner_join only keep observations from x that have a matching key in y, distinct keeps only unique rows
+  inner_join(lr_network %>% distinct(from, to), by = c("from", "to")) # interactions and their weights in the ligand-receptor + signaling network
+
+```
+
+# NicheNet Analsis
+
+Using DESeq2 DE data from HISMCs (stretched/loaded v unstretched/unloaded, aligned) as ligands
+
+## Load input data (sender)
+
+```{r Load data}
+
+# Bulk RNA seq ligands and single cell RNA seq receptors/targets
+# Load ligand cell/"sender" cell information from differential expression analysis of bulk RNASeq
+sender_genes = read.csv(paste0(datadir, "sender_cell_genes", "/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_Results_V1_HGNC_symbols.csv"), header = TRUE)
+
+```
+
+
+## Setting up the sender cell genes
+
+```{r NicheNet, Setting up the sender cell genes}
+
+# SENDER EXPRESSED GENES
+# Character vector giving the gene symbols of the potentially active ligands you want to define ligand activities for.
+sender_cell_type = "SMCs"
+
+# Filter for genes that were differentially expressed, thresholding for padj and positive l2FC
+expressed_genes_sender_stats_tbl = sender_genes %>% filter(padj < 0.05 & log2FoldChange > 0.48)
+expressed_genes_sender = expressed_genes_sender_stats_tbl %>% pull(hgnc)
+
+# IDENTIFYING LIGANDS FROM SENDER CELLS
+# Get a list of the ligands in the ligand-receptor network prior data
+ligands = lr_network %>% pull(from) %>% unique()
+
+# Find which expressed genes from the sender cells are also in the list of ligands from the prior network
+expressed_ligands = intersect(ligands, expressed_genes_sender)
+
+
+expressed_ligands_stats_tbl = expressed_genes_sender_stats_tbl %>%
+  filter(hgnc %in% expressed_ligands) %>% arrange(desc(log2FoldChange))
+
+
+write.csv(expressed_ligands,
+          file = paste0(outdir, "sender_expressed_ligands", "/",
+                        "Expressed_ligands_", proj, sender_cell_type, "_", version, ".csv"),
+          row.names = FALSE, quote = FALSE)
+
+write.csv(expressed_ligands_stats_tbl,
+          file = paste0(outdir, "sender_expressed_ligands", "/",
+                        "Expressed_ligands_table_stats_", proj, sender_cell_type, "_", version, ".csv"),
+          row.names = FALSE, quote = FALSE)
+
+
+```
+
+
+## Setting up the receiver cell genes
+
+```{r NicheNet, Setting  up the receiver cell types}
+
+
+readRDS(file = paste0(scdata_dir, "Drokhlyansky_2020_SCdata_SeuratObject.rds"))
+
+DimPlot(seurat.subset, group.by = "Cell_type_custom", raster = FALSE)
+
+idents_dimplot = c(
+  "Epithelial",
+  "Fibroblast_1",
+  "Fibroblast_2",
+  "Glia",
+  "Neuron",
+  "Vascular",
+  "VascularSMC",
+  "VisceralSMC_1",
+  "VisceralSMC_2",
+  "ICCs",
+  "Macrophage"
+)
+
+seurat.subset.relevantonly = subset(seurat.subset, subset = Cell_type_custom %in% idents_dimplot)
+seurat.subset.relevantonly$Cell_type_custom = factor(seurat.subset.relevantonly$Cell_type_custom, levels = idents_dimplot)
+
+colors_dimplot =
+  c(
+    "#6a3d9a",
+    "#00CED1",
+    "#008080",
+    "#33a02c",
+    "#ffd700",
+    "#af8dc3",
+    "#ff99c8",
+    "#e31a1c",
+    "#ff7f00",
+    "#1f78b4",
+    "#800000"
+  )
+
+DimPlot(
+  seurat.subset.relevantonly,
+  group.by = "Cell_type_custom",
+  raster = FALSE,
+  cols = colors_dimplot
+)
+
+DimPlot(seurat.subset, group.by = "Cell_subtype", raster = FALSE)
+DimPlot(seurat.subset, group.by = "Cell_type", raster = FALSE) # Just checking to see how it looks
+
+# Set the Cell_type as the identity for the seurat object
+Idents(seurat.subset) = "Cell_type"
+
+receiver_cell_types = unique(seurat.subset@meta.data$Cell_type)
+receiver_cell_subtypes = unique(seurat.subset@meta.data$Cell_subtype)
+receiver_cell_types_custom = unique(seurat.subset@meta.data$Cell_type_custom)
+
+```
+
+
+# Run NicheNet
+
+```{r NicheNet function}
+
+
+run_niche_net = function(receiver_cells, ident_col, version_load){
+  
+  for (i in receiver_cells) {
+  
+  print(paste0("Running NicheNet for ", celltype))
+
+  DE_table_receiver = read.table(
+    file = paste0(scdata_dir, "receiver_genes_of_interest", "/",
+                  "Receiver_", celltype, "_cells_DEGs_", version_load, ".csv"), sep = ",", header = TRUE)
+  
+  Idents(seurat.subset) = ident_col
+  
+  # BACKGROUND EXPRESSION
+  # Character vector of gene symbols of the background, non-affected, genes (can contain the symbols of the affected genes as well)
+  expressed_genes_receiver = get_expressed_genes(ident = celltype, seurat.subset, pct = 0.10)
+  background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)] #only using genes in the ligand target matrix
+  
+  # Make a list of the genes of interest in the receiver cells that may be affected by ligands;
+  # genes of which the expression is possibly affected due to communication with other cells
+  geneset_oi = DE_table_receiver %>%
+    filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25) %>%
+    pull(gene)
+  
+  # Keep just the genes in the ligand_target_matrix NN prior
+  geneset_oi = geneset_oi %>%
+    .[. %in% rownames(ligand_target_matrix)]
+  
+  write.csv(geneset_oi,
+            file = paste0(outdir, "receiver_geneset_oi", "/", version, "/",
+                          "NicheNet_GenesetOI_", proj, "SMCs_", celltype, "_", version, ".csv"),
+            row.names = FALSE, quote = FALSE)
+  
+  # IDENTIFYING RECEPTORS IN RECEIVER CELLS
+  # Get a list of the receptors in the ligand-receptor network prior data
+  receptors = lr_network %>% pull(to) %>% unique() # all receptors in the model
+  
+  # Find which expressed genes are also in the list of receptors from the prior network
+  expressed_receptors = intersect(receptors, expressed_genes_receiver) # receptors expressed in the receiver cells
+  
+  write.csv(expressed_receptors,
+            file = paste0(outdir, "receiver_expressed_receptors", "/", version, "/",
+                          "NicheNet_ExpressedReceptors_", proj, "SMCs_", celltype, "_", version, ".csv"),
+            row.names = FALSE, quote = FALSE)
+    
+  # Get the ligand-receptor interactions that are in the expression data
+  # filter the database of ligand-receptor interactions by the expressed genes and ligands
+  # Keeping the interactions where the ligand and receptor are both present in the data
+  expressed_ligands = read.table(file = paste0(outdir, "sender_expressed_ligands", "/",
+                                               "Expressed_ligands_", proj, sender_cell_type, "_", version, ".csv"), header = TRUE) %>% pull(x)
+  
+  lr_network_expressed = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors)
+  
+  write.csv(lr_network_expressed,
+            file = paste0(outdir, "ligand-receptor_network_expressed", "/", version, "/",
+                          "NicheNet_LR-Network-Expressed_", proj, "SMCs_", celltype, "_", version, ".csv"),
+            row.names = FALSE, quote = FALSE)
+  
+  # Get the potential ligands based on the ligand-receptor interactions in the actual data
+  potential_ligands = lr_network_expressed %>% pull(from) %>% unique()
+
+  # Perform NicheNet’s ligand activity analysis on the gene set of interest
+  # Ligand activities are defined as how well they predict the observed transcriptional response (according to NN model)
+  ligand_activities = predict_ligand_activities(geneset = geneset_oi,
+                                                 background_expressed_genes = background_expressed_genes,
+                                                 ligand_target_matrix = ligand_target_matrix,
+                                                 potential_ligands = potential_ligands)
+  
+  ligand_activities = ligand_activities %>% arrange(-aupr_corrected) %>% mutate(rank = rank(desc(aupr_corrected)))
+  print(ligand_activities)
+  
+  write.csv(ligand_activities,
+            file = paste0(outdir, "ligand_activity", "/", version, "/",
+                          "NicheNet_LigandActivity_", proj, "SMCs_", celltype, "_", version, ".csv"),
+            row.names = FALSE, quote = FALSE)
+  }
+}
+
+
+```
+
+```{r NicheNet, Running ligand activity analysis}
+
+# Load the DE results from receiver population to run NicheNet for the INDIVIDUAL cell subtypes
+
+# FROM VERSION 1 CELL TYPES (grouped)
+run_niche_net(receiver_cell_types[c(2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)], "Cell_type", "V1")
+
+
+# FROM VERSION 1 CELL SUBTYPES (individual)
+run_niche_net(receiver_cell_subtypes[c(1, 3)], "Cell_subtype", "V1")
+
+
+# FROM VERSION 2 CELL TYPES CUSTOM LABELS (Myocytes relabeled)
+run_niche_net(receiver_cell_types_custom[c(4, 5, 9, 14)], "Cell_type_custom", "V2")
+
+
+```
+
+
+## Ligand-receptor Heatmaps Function
+
+```{r }
+
+run_lr_link_heatmap = function(receiver_cell_types_list, ligand_ranks, ligand_file_label, factor_to_scale_fig){
+  
+  for (i in receiver_cell_types_list) {
+    
+    celltype = i
+    
+    expressed_ligands_stats_tbl = read.table(
+      file = paste0(outdir, "sender_expressed_ligands", "/",
+                    "Expressed_ligands_table_stats_", proj, sender_cell_type, "_", version, ".csv"),
+      sep = ",", header = TRUE)
+    
+    expressed_receptors = read.table(
+      file = paste0(outdir, "receiver_expressed_receptors", "/", version, "/",
+                    "ExpressedReceptors_", proj, "SMCs_", celltype, "_", version, ".csv"),
+      sep = ",", header = TRUE) %>% pull(x)
+    
+    ligand_activities = as_tibble(read.table(
+      file = paste0(outdir, "ligand_activity", "/", version, "/",
+                    "LigandActivity_", proj, "SMCs_", celltype, "_", version, ".csv"),
+      sep = ",", header = TRUE))
+    
+    ligand_activities_DEstats = ligand_activities %>%
+      left_join(expressed_ligands_stats_tbl, by = c("test_ligand" = "hgnc"))
+    
+    # LIGAND-RECEPTOR INTERACTIONS
+    # Sort table by log2FC and slice the table
+    best_upstream_ligands = ligand_activities_DEstats %>%
+      arrange(desc(log2FoldChange)) %>% # sort by log2FoldChange
+      dplyr::slice(ligand_ranks) %>% # slice the rows (as specified above)
+      pull(test_ligand)
+    
+    # Infer receptors and top-predicted target genes of ligands
+    # that are top-ranked in the ligand activity analysis.
+    # Get the ligand-receptor network of the top-ranked ligands
+    lr_network_top = lr_network %>%
+      filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>%
+      distinct(from, to)
+    
+    best_upstream_receptors = lr_network_top %>%
+      pull(to) %>%
+      unique()
+    
+    # get the weights of the ligand-receptor interactions as used in the NicheNet model
+    lr_network_top_df = weighted_networks_lr %>%
+      filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+    
+    write.csv(lr_network_top_df,
+              file = paste0(outdir, "ligand-receptor_results", "/", version, "/",
+                            "LigandReceptor_", proj, "SMCs_", celltype, "_", ligand_file_label, "_ligands_byLog2FC_", version, ".csv"),
+              row.names = FALSE, quote = FALSE)
+    
+    # convert to a matrix
+    lr_network_top_matrix = lr_network_top_df %>%
+      spread("from", "weight", fill = 0)
+    
+    # HEATMAP
+    lr_network_top_matrix = lr_network_top_matrix %>%
+      select(-to) %>%
+      as.matrix() %>%
+      magrittr::set_rownames(lr_network_top_matrix$to)
+    
+    order_receptors = rev(rownames(lr_network_top_matrix))
+    order_ligands_receptor = ligand_activities_DEstats %>%
+      filter(test_ligand %in% best_upstream_ligands) %>%
+      arrange(desc(log2FoldChange)) %>% pull(test_ligand)
+    
+    vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+    
+    h_pdf = dim(vis_ligand_receptor_network)[1] * factor_to_scale_fig
+    w_pdf = dim(vis_ligand_receptor_network)[2]
+    
+    p_ligand_receptor_network = vis_ligand_receptor_network %>%
+      make_heatmap_ggplot(x_name = "Prioritized ligands from SMCs\n",
+                          y_name = paste0("Receptors expressed by ", celltype, " cells\n"),
+                          color = "mediumvioletred",
+                          x_axis_position = "top",
+                          legend_title = "Prior interaction potential") + 
+      theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 18),
+            plot.subtitle = element_text(hjust = 0.5, size = 15),
+            axis.text.x = element_text(face = "bold", size = 10),
+            axis.text.y = element_text(size = 10), 
+            axis.ticks.x = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.title.x = element_text(face = "bold", size = 15),
+            axis.title.y = element_text(face = "bold", size = 15),
+            plot.margin = unit(c(30, 30, 30, 30), "pt")) + 
+      labs(title = paste0("Ligand-Receptor interactions for ", celltype, " cells"),
+           subtitle = paste0(ligand_file_label, " ligands by log2FoldChange")) +
+      coord_fixed()
+    
+    pdf(file = paste0(outdir, "ligand-receptor_results", "/", version, "/", "heatmaps", "/",
+                      "LigandReceptor_", proj, "SMCs_", celltype, "_",
+                      ligand_file_label, "_ligands_byLog2FC_", version, ".pdf"),
+        height = h_pdf, width = w_pdf)
+    print(p_ligand_receptor_network)
+    dev.off()
+    
+    png(file = paste0(outdir, "ligand-receptor_results", "/", version, "/", "heatmaps", "/",
+                      "LigandReceptor_", proj, "SMCs_", celltype, "_",
+                      ligand_file_label, "_ligands_byLog2FC_", version, ".png"),
+        height = h_pdf, width = w_pdf, res = 300, units = "in")
+    print(p_ligand_receptor_network)
+    dev.off()
+    
+  }
+}
+
+
+```
+
+### Ligand-Receptor interactions using top Ligands by sequence (1:10, 11:20)
+
+```{r Ligand-receptor results, LR heatmaps}
+
+run_lr_link_heatmap(receiver_cell_types_custom, c(1:10), "Top1to10", 0.7)
+run_lr_link_heatmap(receiver_cell_types_custom, c(11:20), "Top11to20", 0.5)
+
+```
+
+
+## Ligand-target Heatmaps Function
+
+```{r Ligand-target results and LT heatmaps}
+
+
+run_lt_link_heatmap = function(receiver_cell_types_list, ligand_ranks, ligand_file_label){
+  
+  for (i in receiver_cell_types_custom) {
+    
+    celltype = i
+    
+    geneset_oi = read.table(file = paste0(outdir, "receiver_geneset_oi", "/", version, "/",
+                                           "NicheNet_GenesetOI_", proj, "SMCs_", celltype, "_", version, ".csv"),
+                             sep = ",", header = TRUE) %>% pull(x)
+    
+    ligand_activities = as_tibble(read.table(file = paste0(outdir, "ligand_activity", "/", version, "/",
+                                                            "NicheNet_LigandActivity_", proj, "SMCs_", celltype, "_", version, ".csv"),
+                                              sep = ",", header = TRUE))
+    
+    ligand_activities = as_tibble(read.table(file = paste0(outdir, "ligand_activity", "/", version, "/",
+                                                            "NicheNet_LigandActivity_", proj, "SMCs_", celltype, "_", version, ".csv"),
+                                              sep = ",", header = TRUE))
+    
+    ligand_activities_DEstats = ligand_activities %>%
+      left_join(expressed_ligands_stats_tbl, by = c("test_ligand" = "hgnc"))
+    
+    # LIGAND-RECEPTOR INTERACTIONS
+    # Sort table by log2FC and slice the table
+    best_upstream_ligands = ligand_activities_DEstats %>%
+      arrange(desc(log2FoldChange)) %>% # sort by log2FoldChange
+      dplyr::slice(ligand_ranks) %>% # slice the rows (as specified above)
+      pull(test_ligand)
+    
+    # LIGAND-TARGET INTERACTIONS
+    # Infer top-predicted target genes of ligands that are top-ranked in the ligand activity analysis
+    active_ligand_target_links_df = best_upstream_ligands %>%
+      lapply(get_weighted_ligand_target_links, geneset = geneset_oi,
+             ligand_target_matrix = ligand_target_matrix, n = 250) %>%
+      bind_rows()
+    
+    write.csv(active_ligand_target_links_df,
+              file = paste0(outdir, "ligand-target_results", "/", version, "/",
+                            "LigandTarget_", proj, "SMCs_", celltype, "_",
+                            ligand_file_label, "_ligands_byLog2FC_", version, ".csv"),
+              row.names = FALSE, quote = FALSE)
+    
+    # HEATMAP
+    active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, # l-t regulatory potential scores of interest
+                                                                     ligand_target_matrix = ligand_target_matrix, ## NN l-t matrix w regulatory potential scores (prior model)
+                                                                     cutoff = 0) # quantile cutoff of l-t scores of input l-t network; scores below cutoff set to 0
+    
+    order_ligands = ligand_activities_DEstats %>%
+      filter(test_ligand %in% best_upstream_ligands) %>%
+      arrange(desc(log2FoldChange)) %>% pull(test_ligand) %>%
+      intersect(colnames(active_ligand_target_links))
+    
+    order_targets = active_ligand_target_links_df$target %>% unique() %>% sort() %>% rev()
+    
+    vis_ligand_target = active_ligand_target_links[order_targets, order_ligands]
+    
+    h_pdf = if (dim(vis_ligand_target)[1] > 100) {
+      (dim(vis_ligand_target)[1] / 6)
+    } else {
+      dim(vis_ligand_target)[1] / 4
+    }
+    
+    w_pdf = if (dim(vis_ligand_target)[2] <= 10) {
+      (dim(vis_ligand_target)[2])
+    } else {
+      dim(vis_ligand_target)[2] / 2
+    }
+    
+    p_ligand_target_network = vis_ligand_target %>%
+      make_heatmap_ggplot(x_name = "Prioritized ligands from SMCs \n",
+                          y_name = paste0("Target genes of interest in ", celltype, " cells\n"),
+                          color = "purple",
+                          legend_position = "top",
+                          x_axis_position = "top",
+                          legend_title = "Regulatory potential") +
+      scale_fill_gradient2(low = "whitesmoke",  high = "purple") +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 18),
+            plot.subtitle = element_text(hjust = 0.5, size = 15),
+            axis.text.x = element_text(face = "bold", size = 10),
+            axis.text.y = element_text(size = 10), 
+            axis.ticks.x = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.title.x = element_text(face = "bold", size = 15),
+            axis.title.y = element_text(face = "bold", size = 15),
+            plot.margin = unit(c(30, 30, 30, 30), "pt")) + 
+      labs(title = paste0("Ligand-Target Links for ", celltype, " cells"),
+           subtitle = paste0(ligand_file_label, " ligands by log2FoldChange"))
+    
+    pdf(file = paste0(outdir, "ligand-target_results", "/", version, "/", "heatmaps", "/",
+                      "NicheNet_LigandTarget_", proj, "SMCs_", celltype, "_",
+                      ligand_file_label, "_ligands_byLog2FC_", version, ".pdf"), height = h_pdf, width = w_pdf)
+    print(p_ligand_target_network)
+    dev.off()
+    
+    png(file = paste0(outdir, "ligand-target_results", "/", version, "/", "heatmaps", "/",
+                      "NicheNet_LigandTarget_", proj, "SMCs_", celltype, "_",
+                      ligand_file_label, "_ligands_byLog2FC_", version, ".png"), height = h_pdf, width = w_pdf, res = 300, units = "in")
+    print(p_ligand_target_network)
+    dev.off()
+    
+    
+  }
+}
+
+```
+
+
+### Ligand-Target links using top Ligands by sequence (1:10, 11:20)
+
+```{r Ligand-receptor results, LR heatmaps}
+
+run_lt_link_heatmap(receiver_cell_types_custom, c(1:10), "Top1to10")
+run_lt_link_heatmap(receiver_cell_types_custom, c(11:20), "Top11to20")
+
+```
+
+
+
+## Inferring active signaling network Function
+
+```{r Ligand-receptor-target INFERRING SIGNALING PATHS}
+
+
+run_get_lt_sig_path = function(receiver_cell_types_list, ligand_file_label){
+  
+  # Get ligand-receptor and ligand-target tables for each cell type
+  for (celltype in receiver_cell_types_list){
+    
+    # LIGAND RECEPTOR
+    lr_network_top_df = read.table(file = paste0(outdir, "ligand-receptor_results", "/", version, "/",
+                                                  "NicheNet_LigandReceptor_", proj, "SMCs_", celltype, "_",
+                                                  ligand_file_label, "_ligands_byLog2FC_", version, ".csv"), sep = ",", header = TRUE)
+    
+    lr_interactions = lr_network_top_df %>%
+      mutate(cell_type = celltype)
+    
+    
+    #LIGAND TARGET
+    active_ligand_target_links_df = read.table(file = paste0(outdir, "ligand-target_results", "/", version, "/",
+                                                              "NicheNet_LigandTarget_", proj, "SMCs_", celltype, "_",
+                                                              ligand_file_label, "_ligands_byLog2FC_", version, ".csv"), sep = ",", header = TRUE)
+    
+    lt_interactions = active_ligand_target_links_df %>%
+      mutate(cell_type = celltype)
+    
+    # They should match (same ligands)
+    (unique(lr_interactions$from))%>%sort()
+    (unique(lt_interactions$ligand))%>%sort()
+    
+    # See receptors
+    (unique(lr_interactions$to)) %>% sort()
+    
+    # See targets
+    (unique(lt_interactions$target))%>%sort()
+    
+    # The ligands should be all the ligands from lr and lt tables (the ligands common between them)
+    ligands = intersect(lr_interactions$from, lt_interactions$ligand) %>% sort
+    
+    # All the receptors identified in the lr_interactions_df
+    receptors = unique(lr_interactions$to)
+    
+    # Targets are the genes in lt_interactions that are NOT in receptors and NOT in ligands
+    # To simplify the Sankey, I have removed any targets that are "receptors" or "ligands" for the dataset.
+    # These can be included technically, but it makes a bit of a mess if there are too many things.
+    targets = unique(lt_interactions %>%
+                       filter(!target %in% receptors) %>%
+                       filter(!target %in% ligands) %>%
+                       filter(target %in% weighted_networks$lr_sig$to) %>%
+                       pull(target))
+    
+    
+    # Using the ligands and targets from all of the cell types of interest and all of the targets from the cell types of interest,
+    # use the NN get_ligand_signaling_path() fxn to get the network from the NN model. 
+    # Here, top_n_regulators is set VERY HIGH to try to capture any/all receptor-target connections (otherwise the weight may be too low)
+    # and we'll miss receptors in the network)
+    active_signaling_network = get_ligand_signaling_path(ligand_tf_matrix = ligand_tf_matrix,
+                                                         ligands_all = ligands,
+                                                         targets_all = targets,
+                                                         weighted_networks = weighted_networks,
+                                                         top_n_regulators = 30000)
+    
+    saveRDS(active_signaling_network, file = paste0(outdir, "inferred_signaling_network", "/",
+                                                    proj_long, "_", celltype, "_", ligand_file_label,
+                                                    "_ligands_byLog2FC_InferredActiveSignalingNetwork_", version, ".rds"))
+    
+  }
+}
+
+```
+
+
+```{r }
+# Select only the cell types we are interested in
+selected_cell_types = receiver_cell_types_custom[c(1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 14)] %>% sort()
+selected_cell_types
+
+run_get_lt_sig_path(selected_cell_types, "Top1to10")
+run_get_lt_sig_path(selected_cell_types, "Top11to20")
+
+
+```
+
+# SANKEY PLOT FOR LIGAND-RECEPTOR-TARGET WEIGHTED NETWORK FUNCTION
+
+```{r }
+
+# SANKEY PLOT FOR LIGAND-RECEPTOR-TARGET INTERACTIONS
+# Make a dataframe for each set of interactions of interest FOR EACH CELL TYPE
+# We will filter the network for the ligand-receptor interactions and receptor-target interactions
+# that can be inferred from lists of ligands, receptors, and targets for each cell type
+
+run_lrt_sankey_setup = function(receiver_cell_types_list, ligand_file_label, plot_height){
+  
+  num_top_ligands = 10 # topN ligands, can be an integer or can be "all" to do all ligands
+  num_top_receptors = "all"
+  num_top_targets = "all"
+  
+  # all, top20, etc (will go in the filename)
+  if (is.numeric(num_top_receptors)) {
+    receptor_file_label = paste0("top", num_top_receptors) 
+  } else if (is.character(num_top_receptors)) {
+    receptor_file_label = paste0(num_top_receptors) 
+  }
+  
+  # all, top20, etc (will go in the filename)
+  if (is.numeric(num_top_targets)) {
+    target_file_label = paste0("top", num_top_targets) 
+  } else if (is.character(num_top_targets)) {
+    target_file_label = paste0(num_top_targets) 
+  }
+  
+  lr_interactions_network_df = data.frame()
+  rt_interactions_network_df = data.frame()
+  
+  for (i in receiver_cell_types_list){
+    
+    celltype = i
+    
+    # Load the active signaling network generated in the above block
+    active_signaling_network = readRDS(file = paste0(outdir, "inferred_signaling_network", "/",
+                                                      proj_long, "_", celltype, "_", ligand_file_label,
+                                                      "_ligands_byLog2FC_InferredActiveSignalingNetwork_", version, ".rds"))
+    
+    active_signaling_network_min_max = active_signaling_network
+    # active_signaling_network_bind = bind_rows(active_signaling_network$sig, active_signaling_network$gr)
+    
+    # Scaling the weights
+    active_signaling_network_min_max$sig = active_signaling_network_min_max$sig %>%
+      mutate(weight = ((weight-min(weight))/(max(weight)-min(weight))) + 0.2)
+    
+    active_signaling_network_min_max$gr = active_signaling_network_min_max$gr %>%
+      mutate(weight = ((weight-min(weight))/(max(weight)-min(weight))) + 0.2)
+    
+    active_signaling_network_bind = bind_rows(active_signaling_network_min_max$sig, active_signaling_network_min_max$gr)
+     
+    
+    # LIGAND RECEPTOR 
+    lr_network_top_network_df = read.table(file = paste0(outdir, "ligand-receptor_results", "/", version, "/",
+                                                          "NicheNet_LigandReceptor_", proj, "SMCs_", celltype, "_",
+                                                          ligand_file_label, "_ligands_byLog2FC_", version, ".csv"), sep = ",", header = TRUE)
+    
+    # LIGAND TARGET
+    active_ligand_target_links_network_df = read.table(file = paste0(outdir, "ligand-target_results", "/", version, "/",
+                                                                      "NicheNet_LigandTarget_", proj, "SMCs_", celltype, "_",
+                                                                      ligand_file_label, "_ligands_byLog2FC_", version, ".csv"), sep = ",", header = TRUE)
+    
+    
+    top_n_receptors = if(num_top_receptors == "all") {
+      as.numeric(dim(lr_network_top_network_df)[1])
+    } else {
+      num_top_receptors
+    }
+    
+    top_n_targets = if(num_top_targets == "all") {
+      as.numeric(dim(active_ligand_target_links_network_df)[1])
+    } else {
+      num_top_targets
+    }
+    
+    
+    # FILTER FOR TOP_N HERE! #######################
+    lr_interactions = lr_network_top_network_df %>%
+      top_n(top_n_receptors, weight) %>%
+      rename(ligand = "from", receptor = "to") %>%
+      arrange(-weight)
+    
+    lt_interactions = active_ligand_target_links_network_df %>%
+      top_n(top_n_targets, weight) %>%
+      arrange(-weight)
+    
+    # INFER RECEPTOR TARGET INTERACTIONS BASED ON INFERRED LT SIGNALING NETWORK
+    # Find the common ligands between the list of LR interactions and the list of LT interactions
+    # We want to remove any LR/LT interactions that do not have a corresponding interaction in the other interaction set
+    ligands = intersect(lr_interactions$ligand, lt_interactions$ligand) %>% sort
+    
+    # Get a list of the unique receptors from the LR interaction list
+    receptors = lr_interactions %>%
+      # Filter out any receptors that are listed as targets in the LT network
+      filter(!receptor %in% lt_interactions) %>%
+      pull(receptor) %>%
+      unique()
+    
+    # Get a list of the unique targets from the LT interaction list
+    targets = lt_interactions %>%
+      # Filter out any targets that are listed as receptors in the LR network
+      filter(!target %in% receptors) %>%
+      # Filter out any targets that are in the list of common ligands
+      filter(!target %in% ligands) %>%
+      # Filter out any targets that appear as receptors in the NN lr_network ($to)
+      filter(!target %in% lr_network$to) %>%
+      pull(target) %>%
+      unique()
+    
+    # Build a table of the ligand-receptor interactions by filtering the activate signaling network
+    # based on the list of ligands and the list of receptors
+    lr_interactions_network = active_signaling_network_bind %>%
+      inner_join(lr_interactions, by = c("from" = "ligand", "to" = "receptor"), keep = TRUE) %>%
+      # Select the columns we want to keep (weights form sig network)
+      dplyr::select(ligand, receptor, weight = weight.x) %>%
+      # add the cell type in a new column
+      mutate(cell_type = celltype) %>%
+      filter(ligand %in% ligands) %>%
+      filter(receptor %in% receptors)
+    
+    # Build a table of the receptor-target interactions by filtering the activate signaling network
+    # based on the list of receptors and the list of targets
+    rt_interactions_network = active_signaling_network_bind %>%
+      # Filter the sig network to get the interactins between the receptors and targets present in the network
+      filter(from %in% receptors & to %in% targets) %>%
+      rename(receptor = "from", target = "to") %>%
+      # add the cell type in a new column
+      mutate(cell_type = celltype) %>%
+      filter(receptor %in% receptors) %>%
+      filter(target %in% targets)
+    
+    # filter the lr interactions to only keep interactions if the receptor appears in the receptors of the rt interactions
+    lr_interactions_network_filt = lr_interactions_network %>%
+      # Keep only receptors common between the lr and rt interactions
+      filter(receptor %in% intersect(lr_interactions_network$receptor, rt_interactions_network$receptor))
+    
+    # filter the rt interactions to only keep interactions if the receptor appears in the receptors of the lr interactions
+    rt_interactions_network_filt = rt_interactions_network %>%
+      # Keep only receptors common between the lr and rt interactions
+      filter(receptor %in% intersect(lr_interactions_network$receptor, rt_interactions_network$receptor))
+    
+    # Bind the table of lr interactions for the cell type in this instance of the loop to the full table of lr interactions
+    lr_interactions_network_df = bind_rows(lr_interactions_network_df, lr_interactions_network_filt) 
+    
+    # Bind the table of rt interactions for the cell type in this instance of the loop to the full table of rt interactions
+    rt_interactions_network_df = bind_rows(rt_interactions_network_df, rt_interactions_network_filt)
+    
+    # Check for overlaps
+    print(intersect(lr_interactions_network_filt$ligand, receptors))
+    print(intersect(lr_interactions_network_filt$receptor, targets))
+    print(intersect(rt_interactions_network_filt$receptor, targets))
+    print(intersect(rt_interactions_network_filt$target, receptors))
+    
+  }
+  
+  # To make the Sankey Plot, the interactions need to be combined in one dataframe of "from, to" (source, target) interactions
+  # https://christophergandrud.github.io/networkD3/
+  # https://r-graph-gallery.com/323-sankey-diagram-with-the-networkd3-library.html
+  lrt_interactions_network = bind_rows(lr_interactions_network_df %>% rename(from = "ligand", to = "receptor"),
+                                        rt_interactions_network_df %>% rename(from = "receptor", to = "target"))
+    
+  
+  # Now we have to make 2 data frames: a 'links' data frame with 3 columns (from, to, value), and a 'nodes' data frame that gives the name of each node
+  
+  # NODES dataframe
+  # Make the node list
+  nodes = as.data.frame(tibble(name = unique(c(lrt_interactions_network$from,
+                                                lrt_interactions_network$to))))
+  
+  # The Sankey fxn wants this nodelist to be index at zero.
+  # Rename rownames to start at 0 instead of 1.
+  rownames(nodes) = c(0:(length(nodes$name)-1))
+  
+  # Rownames to columns (need column of numeric values to represent the nodes)
+  nodes = nodes %>%
+    rownames_to_column()
+  
+  # This works because the lrt_interactions_network that is used to make the nodes list is bult from binding the lr_interactions_network_df
+  # and the rt_interactions_network_df (just stacking the dataframes together in the worder)
+  # so the ligands will be the first in the "from" column of lr_interactions_network_df,
+  # the receptors will be the "from" in the rt_interactions_network_df,
+  # and the targets will be the "to" in the rt_interactions_network_df.
+  # Make a vector of ligand/receptor/target groups using the number of unique l/r/t entries.
+  nodes$group = c(rep("ligand", c(length(unique(lr_interactions_network_df$ligand)))),
+                   rep("receptor", c(length(unique(lr_interactions_network_df$receptor)))),
+                   rep("target", c(length(unique(rt_interactions_network_df$target)))))
+  
+  
+  # LINK dataframe
+  # This full version of the dataframe can be used to check that everything is lining up correctly.
+  lrt_interactions_sankey_fulldf = lrt_interactions_network %>%
+    # inner join with the nodelist to replace the names with numeric values from the nodelist for the from and to columns
+    inner_join(., nodes, by = c("from" = "name")) %>%
+    inner_join(., nodes, by = c("to" = "name")) %>%
+    mutate(source = rowname.x) %>%
+    mutate(target = rowname.y)
+  
+  # Select just the columns needed for the sankeyNetwork function
+  lrt_interactions_sankey = lrt_interactions_sankey_fulldf %>%
+    select(source, target, weight, cell_type) %>%
+    # Change the source and target IDs to be numeric values for sankeyNetwork
+    mutate(source = as.numeric(source)) %>%
+    mutate(target = as.numeric(target))
+  
+  
+  ## ACTUALLY PLOTTING THE SANKEY NETWORK
+  color_groups = c("Epithelial", "Fibroblast_1", "Fibroblast_2", "Glia", "Neuron", "Vascular", "VascularSMC", "VisceralSMC_1", "VisceralSMC_2", "ICCs", "Macrophage", "ligand", "receptor", "target")
+  
+  # colors = c("#008B8B", "#0000FF", "#00008B", "#9ACD32", "#FFD700", "#8A2BE2", "#FF6347", "#C71585", "#8B008B",
+  #             "#000000", "#8A5678", "#FFFFFF", "#FFFFFF", "#FFFFFF")
+  
+  colors = c("#6a3d9a", "#00CED1", "#008080", "#33a02c", "#ffd700", "#af8dc3", "#ff99c8", "#e31a1c", "#ff7f00", "#1f78b4", "#800000", "#FFFFFF", "#FFFFFF", "#FFFFFF")
+  
+  color_key = colors
+  names(color_key) = color_groups
+  
+  # https://r-graph-gallery.com/322-custom-colours-in-sankey-diagram.html
+  my_color = 'd3.scaleOrdinal() .domain(["Epithelial", "Fibroblast_1", "Fibroblast_2", "Glia", "Neuron", "Vascular", "VascularSMC", "VisceralSMC_1", "VisceralSMC_2", "ICCs", "Macrophage", "ligand", "receptor", "target"]) .range(["#6a3d9a", "#00CED1", "#008080", "#33a02c", "#ffd700", "#af8dc3", "#ff99c8", "#e31a1c", "#ff7f00", "#1f78b4", "#800000", "#FFFFFF", "#FFFFFF", "#FFFFFF"])'
+  
+  sankey_lrt = sankeyD3::sankeyNetwork(
+  Links = as.data.frame(lrt_interactions_sankey %>% arrange(cell_type)),
+  Nodes = nodes,
+  Source = "source",
+  Target = "target",
+  Value = "weight",
+  NodeID = "name",
+  colourScale = my_color,
+  LinkGroup = "cell_type",
+  NodeGroup="group",
+  fontSize = 8,
+  nodeWidth = 50,
+  height = plot_height,
+  width = 1000,
+  # iterations = 50,
+  fontFamily = "Arial",
+  nodePadding = 8, # padding between nodes
+  nodeStrokeWidth = 0.5,
+  nodeCornerRadius = 3,
+  align = "center",
+  showNodeValues = FALSE,
+  curvature	= 0.3,
+  # nodeLabelMargin = 10,
+  linkOpacity = 0.85
+  )
+  
+  return(list(lrt_interactions_network, sankey_lrt, color_key))
+  
+}
+
+
+```
+
+
+
+```{r Sankey LRT}
+
+# Select only the cell types we are interested in
+selected_cell_types = receiver_cell_types_custom[c(1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 14)] %>% sort()
+selected_cell_types
+
+
+sankey_Top1to10 = run_lrt_sankey_setup(selected_cell_types, "Top1to10", 1000)
+
+onRender(sankey_Top1to10[[2]],
+         '
+   function(el, x) {
+    d3.selectAll(".node text").attr("text-anchor", "middle").attr("x", 25);
+      var sankey = this.sankey;
+      var path = sankey.link();
+      var nodes = d3.selectAll(".node");
+      var link = d3.selectAll(".link");
+      var width = el.getBoundingClientRect().width;
+      var height = el.getBoundingClientRect().height;
+
+    window.dragmove = function(d) {
+      d3.select(this).attr("transform",
+        "translate(" + (
+           d.x = Math.max(0, Math.min(width - d.dx, d3.event.x))
+            ) + "," + (
+            d.y = Math.max(0, Math.min(height - d.dy, d3.event.y))
+          ) + ")");
+      sankey.relayout();
+      link.attr("d", path);
+    };
+
+    nodes.call(d3.drag()
+      .subject(function(d) { return d; })
+      .on("start", function() { this.parentNode.appendChild(this); })
+      .on("drag", dragmove));
+  }
+  '
+) %>% saveNetwork(file = paste0(outdir, "sankey_inferredLT/",
+                                proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+                                "all", "-LRlinks_", "all",
+                                "-LTlinks_Sankey_InferredLTPaths_", version, ".html"))
+
+webshot::webshot(paste0(outdir, "sankey_inferredLT/",
+                                proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+                                "all", "-LRlinks_", "all",
+                                "-LTlinks_Sankey_InferredLTPaths_", version, ".html"),
+                 paste0(outdir, "sankey_inferredLT/",
+                                proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+                                "all", "-LRlinks_", "all",
+                                "-LTlinks_Sankey_InferredLTPaths_", version, ".pdf"),
+                 vwidth = 1000, vheight = 1200)
+
+
+
+
+
+sankey_Top11to20 = run_lrt_sankey_setup(selected_cell_types, "Top11to20", 1500)
+
+onRender(sankey_Top11to20[[2]],
+         '
+   function(el, x) {
+    d3.selectAll(".node text").attr("text-anchor", "middle").attr("x", 25);
+      var sankey = this.sankey;
+      var path = sankey.link();
+      var nodes = d3.selectAll(".node");
+      var link = d3.selectAll(".link");
+      var width = el.getBoundingClientRect().width;
+      var height = el.getBoundingClientRect().height;
+
+    window.dragmove = function(d) {
+      d3.select(this).attr("transform",
+        "translate(" + (
+           d.x = Math.max(0, Math.min(width - d.dx, d3.event.x))
+            ) + "," + (
+            d.y = Math.max(0, Math.min(height - d.dy, d3.event.y))
+          ) + ")");
+      sankey.relayout();
+      link.attr("d", path);
+    };
+
+    nodes.call(d3.drag()
+      .subject(function(d) { return d; })
+      .on("start", function() { this.parentNode.appendChild(this); })
+      .on("drag", dragmove));
+  }
+  '
+) %>% saveNetwork(file = paste0(outdir, "sankey_inferredLT/",
+                                proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+                                "all", "-LRlinks_", "all",
+                                "-LTlinks_Sankey_InferredLTPaths_", version, ".html"))
+
+webshot::webshot(paste0(outdir, "sankey_inferredLT/",
+                                proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+                                "all", "-LRlinks_", "all",
+                                "-LTlinks_Sankey_InferredLTPaths_", version, ".html"),
+                 paste0(outdir, "sankey_inferredLT/",
+                                proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+                                "all", "-LRlinks_", "all",
+                                "-LTlinks_Sankey_InferredLTPaths_", version, ".pdf"),
+                 vwidth = 1000, vheight = 1200)
+
+
+
+```
+
+
+```{r Color key}
+
+# Make the color key (seprate)
+pdf("color.pdf", height = 10, width = 10)
+plot(NULL, xaxt = 'n', yaxt = 'n', bty = 'n',
+     ylab = '', xlab = '',
+     xlim = 0:1, ylim = 0:1)
+legend("topleft", legend = names(color_key)[1:11],
+       pch = 16, pt.cex = 3, cex = 1.5, bty = 'n',
+       col = unname(color_key)[1:11])
+mtext("Cell type", at=0, cex=2)
+dev.off()
 
 ```
