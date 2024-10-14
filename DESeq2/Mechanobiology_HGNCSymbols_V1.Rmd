@@ -1,6 +1,6 @@
 ---
 title: "Heuckeroth-Wolfson Mechanobiology"
-subtitle: "Rename genes with of"
+subtitle: "Rename genes with official HGNC symbols for use with NicheNet"
 author: Katherine Beigel
 editor_options: 
   chunk_output_type: console
