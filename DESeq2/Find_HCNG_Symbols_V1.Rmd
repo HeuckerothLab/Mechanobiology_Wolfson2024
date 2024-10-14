@@ -1,0 +1,102 @@
+---
+title: "Heuckeroth-Wolfson Mechanobiology"
+subtitle: "Rename genes with of"
+author: Katherine Beigel
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Setup}
+
+library(Matrix)
+library(nichenetr)
+library(Seurat)
+library(SeuratWrappers)
+
+library(tidyverse)
+library(mgsub)
+library(gsubfn)
+
+library(circlize)
+library(svglite)
+
+```
+
+```{r Directories}
+
+# Directory for loading the differential expression results table
+de_dir = "output/V1/"
+
+# Directory for output
+out_dir = "output/V1/"
+
+```
+
+``` {r Check if ouput dirs exist; if not, create}
+
+dirs <- c("sender_cell_genes")
+
+for (i in 1:length(dirs)){
+  if (!dir.exists(file.path(paste0(out_dir, dirs[i], "/"),  fsep="/"))) {
+    dir.create(file.path(paste0(out_dir, dirs[i], "/"),  fsep="/"))
+    print(paste0(dirs[i], " created"))
+  } else {
+    print(paste0(dirs[i], " exists"))
+  }
+}
+
+```
+
+Using DESeq2 DE data from HISMCs (stretched/loaded v unstretched/unloaded, aligned) as ligands, so we need to makre sure these are HCNG symbols.
+
+```{r Load data}
+
+# Bulk RNA seq ligands and single cell RNA seq receptors/targets
+# Suggestions from developers on combining scRNA seq and bulk RNA seq data:
+# https://github.com/saeyslab/nichenetr/blob/master/vignettes/faq.md#can-i-use-nichenet-on-bulk-rnaseq-data-as-well-or-only-on-single-cell-data
+# https://github.com/saeyslab/nichenetr/issues/151
+# https://github.com/saeyslab/nichenetr/issues/75
+# https://github.com/saeyslab/nichenetr/issues/70
+
+# There is no vignette for combining bulk RNA seq data (or doing bulk RNA seq data in general)
+# with scRNA. However, on the github page, one of the developers offers several suggestions on how to
+# possibly incorporate these two types of data.
+
+# Using DESeq2 results in NicheNet: https://github.com/saeyslab/nichenetr/issues/186
+# Load ligand cell/"sender" cell information from differential expression analysis of bulk RNASeq
+sender_genes_orig = read.csv(paste0(de_dir, "Mechanobio_Align-loaded_v_unloaded_DESeq2_Results_V1.csv"), header = TRUE)
+
+```
+
+```{r NicheNet, Setting up the sender cell genes}
+
+# Filter for genes that were differentially expressed, thresholding for padj and positive l2FC
+names_sender_genes_orig = sender_genes_orig %>% pull(X)
+
+# Make sure the symbols are all updated HGNC labels
+# https://rdrr.io/cran/Seurat/man/UpdateSymbolList.html
+names_sender_genes_update = GeneSymbolThesarus(names_sender_genes_orig, several.ok = FALSE,
+                                               search.types = c("alias_symbol", "prev_symbol"), verbose = TRUE)
+
+count = 0 # counter for number of genes with symbols updated
+# Update names to be HGNC approved symbols
+names_sender_genes_hgnc = vector()
+for (i in 1:length(names_sender_genes_orig)) {
+  gene = names_sender_genes_orig[i]
+  if (gene %in% (names(names_sender_genes_update))) {
+    names_sender_genes_hgnc = append(names_sender_genes_hgnc, unlist(unname(names_sender_genes_update[gene][1])))
+    count = count +1 # increment the count
+  } else { 
+    names_sender_genes_hgnc = append(names_sender_genes_hgnc, names_sender_genes_orig[i])
+  }
+}
+print(paste0("Updated ", count, " symbols.")) # print result of the count to see how many symbols were replaced
+
+sender_genes = sender_genes_orig %>%
+  mutate(hgnc = names_sender_genes_hgnc)
+
+write.csv(sender_genes,
+          file = paste0(out_dir, "/", "Mechanobio_Align-loaded_v_unloaded_DESeq2_Results_V1_HGNC_symbols.csv"),
+        row.names = FALSE, quote = FALSE)
+
+```
