@@ -1,0 +1,230 @@
+---
+title: "Heuckeroth-Wolfson Mechanobiology"
+subtitle: "Ligand-receptor analysis - NicheNet setup V2, setting up data for receiver cells (Drokhlyansky et al. 2020)"
+author: Katherine Beigel
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r Setup}
+
+library(Matrix)
+library(nichenetr)
+library(Seurat)
+
+library(tidyverse)
+library(mgsub)
+library(gsubfn)
+
+library(circlize)
+library(svglite)
+
+```
+
+```{r Directories}
+
+# Here, version refers to different schemes that were used for grouping and renaming the Drokhlyansky data
+version <- "V2"
+
+# Directory for loading the differential expression results table
+de_dir = "../DESeq2/output/V1/"
+
+# Directory for the MTX/MEX file, genes file, and barcodes file
+# https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/matrices#r-load-mat
+matrix_dir = "Drokhlyansky_2020_ENS_SCdata/SCP1038/expression/5f5af25d771a5b0dbe65cf67/"
+meta_dir = "Drokhlyansky_2020_ENS_SCdata/SCP1038/metadata/"
+cluster_dir = "Drokhlyansky_2020_ENS_SCdata/SCP1038/cluster/"
+
+
+# Directory for NicheNet prior data (the models that NicheNet uses for ligand-receptor and ligand-target analyses)
+nnetdata_dir <- "data/"
+
+
+# Where to save seurat object of scRNA data
+scdata_dir = "data/Drokhlyansky_scRNA/"
+
+
+```
+
+```{r Load NicheNet priors}
+# https://github.com/saeyslab/nichenetr/blob/master/vignettes/ligand_activity_geneset.md
+
+# Load NicheNet pre-built prior model (described in: https://www.nature.com/articles/s41592-019-0667-5)
+
+# Ligands are columns and receptors are rows; each cell gives the 'prior potential'
+# that a particular ligand might regulate the expression of a specific target gene
+# Values are Pearson correlation coefficient of ligand to predict target genes
+ligand_target_matrix = readRDS(paste0(nnetdata_dir, "nichenet_prior_model/", "ligand_target_matrix.rds"))
+
+# Load NicheNet network of putative ligand-receptor links
+lr_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model/", "lr_network.rds"))
+
+# Load NicheNet weighted networks
+weighted_networks = readRDS(paste0(nnetdata_dir, "nichenet_prior_model/", "weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>%
+  # inner_join only keep observations from x that have a matching key in y, distinct keeps only unique rows
+  inner_join(lr_network %>% distinct(from, to), by = c("from", "to")) # interactions and their weights in the ligand-receptor + signaling network
+
+```
+
+
+```{r Load scRNA data}
+
+# Receptor data will be from some single cell data (from Single Cell Portal)
+# https://broadinstitute.github.io/2020_scWorkshop/data-wrangling-scrnaseq.html
+
+# Data from: https://singlecell.broadinstitute.org/single_cell/study/SCP1038/
+# Load the metadata for the single cell data
+metadata.path <- paste0(meta_dir, "all.meta.txt") # metadata
+
+# Load receptor cell/"receiver" cell information from single cell data set
+barcode.path <- paste0(matrix_dir, "hli.barcodes.tsv") # cell barcodes
+features.path <- paste0(matrix_dir, "hli.genes.tsv") # gene names
+matrix.path <- paste0(matrix_dir, "gene_sorted-hli.matrix.mtx") # mtx file
+tsne.path <- paste0(cluster_dir, "hli.tsne2.txt")
+
+meta <- read.csv(file = metadata.path, sep = "\t")
+meta.filt <- meta %>%
+  filter(Dataset == "Human colon all cells (10X)") # subset for only the human data
+
+# Read in the sparse matrix, this will be genes x cells in a dgTMatrix
+mat <- readMM(file = matrix.path)
+
+# Get feature names and cell names
+feature.names = read.delim(features.path, header = FALSE, stringsAsFactors = FALSE)
+barcode.names = read.delim(barcode.path, header = FALSE, stringsAsFactors = FALSE)
+
+# Assign feature (gene) names to rows and cell barcodes to columns of matrix
+rownames(mat) = feature.names$V1
+colnames(mat) = barcode.names$V1
+
+```
+
+```{r Construct Seurat object for single celled data}
+
+# https://nbisweden.github.io/workshop-scRNAseq/labs/compiled/seurat/seurat_01_qc.html
+# Make a Seurat object. this will make it easier to interact with this data.
+seurat <- CreateSeuratObject(counts = mat)
+
+# match() will return a vector of position of matches of the first argument in the second
+meta.filt.sort <- meta.filt[match(meta.filt$NAME, rownames(seurat@meta.data)),]
+
+# Add cell type as a column; cell type is defined in the metadata
+# Metadata cells (NAME) are in the same order as the seurat object) which is in the same order as the seurat object
+seurat <- AddMetaData(object = seurat, meta.filt.sort$Annotation, col.name = "Cell_subtype")
+
+
+# Add information from tsne reduction to seurat object
+# https://github.com/satijalab/seurat/issues/4515#issuecomment-846322426
+tsne.data <- read.table(paste0(cluster_dir, "hli.tsne2.txt"), header = TRUE)
+
+# pull tsne coordinates
+tsne.coords <- tsne.data[2:nrow(tsne.data),] %>%
+  remove_rownames() %>%
+  select(NAME, tsne_1 = X, tsne_2 = Y) %>% 
+  column_to_rownames("NAME") %>%
+  mutate_if(is.character, as.numeric) %>%
+  as.matrix()
+
+seurat[['tsne']] <- CreateDimReducObject(embeddings = tsne.coords, key = "tsne_", global = T, assay = "RNA")
+Idents(seurat) <- "Cell_subtype"
+
+DimPlot(seurat, raster = FALSE) # Just checking to see how it looks
+
+```
+
+
+```{r NicheNet, setting  up the receiver cell types}
+# Make any modifications to the Seurat object here (drop cell types, group cell types, etc.)
+
+# Set the Cell_type as the identity for the seurat object
+Idents(seurat) <- "Cell_subtype"
+
+# RECEIVER CELL TYPES - INDIVIDUAL
+# Names of receiver cell types
+patient_specific <- c("H3", "MHC.I_H1", "MHC.I_H9", "OXPHOS_H3") # use if some of the types need to be removed
+receiver_cell_subtypes <- unique(meta.filt$Annotation)[!unique(meta.filt$Annotation) %in% patient_specific]
+
+# Subset the seurat object for each ident (one per loop)
+seurat.subset <- subset(x = seurat, idents = receiver_cell_subtypes)
+
+
+# RECEIVER CELL TYPES - GROUPED
+# Make of list of the grouped cell types
+receiver_cell_types <- unique(gsubfn("_[0-9]$", "", receiver_cell_subtypes))
+
+# Add the cell types as a new column on the seruat object metadata
+seurat.subset <- AddMetaData(seurat.subset, gsubfn("_[0-9]$", "", seurat.subset@meta.data$Cell_subtype), col.name = "Cell_type")
+
+
+# RECEIVER CELL TYPES - CUSTOM LABELS
+# Add the cell types as a new column on the seruat object metadata
+seurat.subset <- AddMetaData(seurat.subset, mgsub(seurat.subset@meta.data$Cell_subtype,
+                                    c("Fibroblast_1", "Fibroblast_2", "Myocyte_3", "Myocyte_5", "Myocyte_4"),
+                                    c("Fibroblast_1", "Fibroblast_2", "VisceralSMC_1", "VisceralSMC_2", "VascularSMC")), col.name = "Cell_type_custom")
+seurat.subset@meta.data$Cell_type_custom <- mgsub(seurat.subset@meta.data$Cell_type_custom,
+                                                  c("Myocyte_2", "Vascular_1", "Glia_1", "Vascular_2", "Myocyte_1", "Glia_3", "Glia_2"),
+                                                  c("Myocyte", "Vascular", "Glia", "Vascular", "Myocyte", "Glia", "Glia"))
+
+# Make of list of the grouped cell types
+receiver_cell_types_custom <- unique(seurat.subset@meta.data$Cell_type_custom)
+
+# DimPlots to see how it looks
+DimPlot(seurat.subset, group.by = "Cell_subtype", raster = FALSE)
+DimPlot(seurat.subset, group.by = "Cell_type", raster = FALSE) # Just checking to see how it looks
+DimPlot(seurat.subset, group.by = "Cell_type_custom", raster = FALSE)
+
+save(seurat.subset, file = paste0(scdata_dir, "Drokhlyansky_2020_SCdata_SeuratObject.Rdata"))
+
+```
+
+```{r NicheNet, Receiver cell types differentially expressed genes}
+
+# NicheNet set up:
+# geneset (geneset_oi) is the differentially expressed genes of the cell type of interest vs all other cells
+# background_expressed_genes (background_expressed_genes) is all of the genes expressed by the cell type of interest
+# ligand_target_matrix (ligand_target_matrix) is the ligand target matrix from NicheNet (NicheNet prior model)
+# potential_ligands (potential_ligands) are the differentially expressed genes form the sender cell type that are considered
+#   to be potential ligands based on the expressed receptors in the receiver cell type that are also in the prior network
+
+# get_expressed_genes() and FindMarkers fxns can take awhile to run.
+# it's easier easier to save the results of that and then reload them than to run each time
+
+# DIFFERENTIAL EXPRESSION OF SPECIFIC CELL TYPES VS ALL OTHER CELL TYPES
+# Get the differentially expressed genes of the cell type of interest (using all other cell types together as the reference)
+# https://satijalab.org/seurat/archive/v3.1/de_vignette.html
+# In FindMarkers: if ident.2 = NULL, use all other cells for comparison
+
+
+# GROUPED: Find the genes in each receiver cell type (subtypes grouped) that are differentially expressed
+# compared to all of the other cell types, with subtypes (_1, _2, etc.) of cell types grouped together.
+for (i in receiver_cell_types_custom[c(4, 5, 9, 14)]) {
+  print(i)
+  
+  condition_oi <- i
+  
+  Idents(seurat.subset) <- "Cell_type_custom"
+  DE_table_receiver <- FindMarkers(object = seurat.subset, ident.1 = condition_oi, ident.2 = NULL, min.pct = 0.10) %>% rownames_to_column("gene")
+    
+  write.csv(DE_table_receiver, file = paste0(scdata_dir, "receiver_genes_of_interest", "/", "Receiver_", condition_oi, "_cells_DEGs_", version, ".csv"), row.names = FALSE, quote = FALSE)
+  
+}
+
+# 
+# # SUBTYPES: Find the genes in each receiver cell type (individual subtypes) that are differentially expressed
+# # compared to all of the other cell types (using original cell types and subtypes). 
+# # In other words, each subtype (_1, _2, etc.) for each cell type is analyzed individually.
+# for (i in receiver_cell_subtypes[!receiver_cell_subtypes %in% receiver_cell_types]) {
+#   print(i)
+#   
+#   condition_oi <- i
+# 
+#   # In FindMarkers: if ident.2 = NULL, use all other cells for comparison
+#   Idents(seurat.subset) <- "Cell_subtype"
+#   DE_table_receiver <- FindMarkers(object = seurat.subset, ident.1 = condition_oi, ident.2 = NULL, min.pct = 0.10) %>% rownames_to_column("gene")
+#   
+#   write.csv(DE_table_receiver, file = paste0(scdata_dir, "receiver_genes_of_interest", "/", "Receiver_", condition_oi, "_cells_DEGs_", version, ".csv"), row.names = FALSE, quote = FALSE)
+# }
+
+```
