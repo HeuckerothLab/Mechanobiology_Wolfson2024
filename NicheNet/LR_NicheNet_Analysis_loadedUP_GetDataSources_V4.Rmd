@@ -1,0 +1,234 @@
+---
+title: "Heuckeroth-Wolfson Mechanobiology V4"
+subtitle: "Identifying the NicheNet data sources for ligand-receptor and ligand-target interactions"
+author: Katherine Beigel
+date: "`r Sys.Date()`"
+editor_options: 
+  chunk_output_type: console
+---
+
+This can be run after `Up_in_Stretched/scripts/LR_NicheNet_Analysis_loadedUP_V4.Rmd` to identify the model data sources for the interaction preidcted by NicheNet.
+
+```{r Packages}
+# Utility
+library(tidyverse)
+
+# Analysis
+library(nichenetr)
+library(OmnipathR)
+```
+
+
+```{r Project information}
+proj = "loaded"
+proj_long = "Up_in_Stretched"
+
+version = "V4"
+```
+
+## Load in the modified model (after generating these files from `Up_in_Stretched/scripts/LR_NicheNet_Analysis_loadedUP_V4.Rmd`)
+
+### Data sources in the NicheNet prior model
+
+There are two main parts of how ligand-receptor interactions are defined in the NicheNet model: the ligand-receptor network (`lr_network`), which is used to screen the data for LR interactions, and the signaling network (`sig_network`) which is used to construct the weights for the ligand-receptor interactions.
+
+The `lr_network` basically only has two databases/sources: `omnipath` (https://omnipathdb.org/) and `nichenet_verschueren` (interactions described here in this paper: https://pubmed.ncbi.nlm.nih.gov/32589946/; more info in the preprint for the updated NicheNet model: https://www.biorxiv.org/content/10.1101/2023.06.13.544751v1 )
+
+The `sig_network` has additional databases and sources which may provide additional support for certain interactions, so we will look at that as well.
+
+```{r Load in modified model}
+
+nnetdata_dir = "data/"
+
+lr_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "lr_network_modified_", version, ".rds"))
+sig_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "sig_network_modified_", version, ".rds"))
+gr_network = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "gr_network_modified_", version, ".rds"))
+
+weighted_networks = readRDS(paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "weighted_networks_modified_", version, ".rds"))
+ligand_target_matrix = readRDS(file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_target_matrix_modified_", version, ".rds"))
+ligand_tf_matrix = readRDS(file = paste0(nnetdata_dir, "nichenet_prior_model_V2_modified/", "ligand_tf_matrix_modified_", version, ".rds"))
+
+weighted_networks_lr = weighted_networks$lr_sig %>%
+  # inner_join only keep observations from x that have a matching key in y, distinct keeps only unique rows
+  inner_join(lr_network %>% distinct(from, to), by = c("from", "to")) # interactions and their weights in the ligand-receptor + signaling network
+
+```
+
+
+## Define a table of **ligand-receptor interactions of interest** that we want to get evidence for
+```{r Interactions to find evidence for}
+interactions_oi = read_tsv(
+    file = paste0(
+    proj_long, "/sankey_inferredLT/",
+    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
+)
+```
+
+
+### Loading the OmniPath databases
+```{r Load OmniPath resources}
+
+nichenet_refs = interactions_oi %>% dplyr::select(-c('cell_type')) %>% distinct(from, to, .keep_all = FALSE) %>%
+  left_join(lr_network, relationship = "many-to-many") %>%
+  dplyr::filter(!is.na(database))
+
+db_to_keep = get_intercell_resources()[(!get_intercell_resources() %in% c("OmniPath", "GO_Intercell"))]
+
+# Omnipath intercell database
+omnipath_intercell = import_omnipath_intercell(
+  resources = db_to_keep,
+  organism = 9606,
+  fields = NULL,
+  default_fields = TRUE,
+  references_by_resource = TRUE,
+  exclude = NULL,
+  strict_evidences = FALSE
+)
+
+# additional OmniPath annotations for the genes of interest
+omnipath_annotations = import_omnipath_annotations(
+  proteins = c(unique(nichenet_refs$from), unique(nichenet_refs$to)),
+  resources = NULL,
+  wide = FALSE
+)
+
+# get_interaction_resources()
+omnipath_interactions = import_omnipath_interactions(
+  resources = NULL,
+  datasets = c("omnipath", "ligrecextra", "pathwayextra"),
+  organism = 9606,
+  dorothea_levels = c("A", "B"),
+  exclude = "Wang",
+  fields = NULL,
+  default_fields = TRUE,
+  references_by_resource = TRUE,
+  strict_evidences = FALSE
+)
+
+```
+
+The additional filtering should all be added **here** in the next chunk. For now I have my simplified filtering.
+
+```{r Filter Omnipath database}
+
+omnipath_intercell_ligands = omnipath_intercell %>%
+  filter(transmitter == TRUE)
+
+omnipath_intercell_receptors = omnipath_intercell %>%
+  filter(receiver == TRUE)
+
+intercell_network = import_intercell_network(
+  transmitter_param = list(unique(omnipath_intercell_ligands$genesymbol)),
+  receiver_param = list(unique(omnipath_intercell_receptors$genesymbol)),
+  resources = NULL,
+  organism = 9606,
+  omnipath = TRUE,
+  ligrecextra = TRUE,
+  fields = NULL,
+  default_fields = TRUE,
+  references_by_resource = TRUE,
+  exclude = NULL,
+  strict_evidences = FALSE
+)
+
+# Evidences to keep or remove based on what was done in NicheNet.
+ligand_cats_keep = c("ligand", "cell_adhesion", "cell_surface_ligand", "secreted", "interleukins_hgnc","chemokine_ligands_hgnc", "endogenous_ligands_hgnc", "surface_ligand", "secreted_enzyme")
+receptor_cats_keep = c("receptor", "cell_adhesion", "interleukin_receptors_hgnc")
+sources_to_remove = c("Wang")
+databases_to_remove = c("Omnipath", "LRdb;OmniPath", "GO_Intercell;OmniPath", "scConnect;OmniPath", "Cellinker;OmniPath", "Cellinker;scConnect;OmniPath", "Cellinker;Zhong2015;OmniPath")
+
+intercell_network_filt = intercell_network %>%
+  filter(category_intercell_source %in% ligand_cats_keep) %>%
+  filter(category_intercell_target %in% receptor_cats_keep) %>%
+  filter(!sources %in% sources_to_remove) %>%
+  filter(!database_intercell_source %in% databases_to_remove) %>%
+  filter(!database_intercell_target %in% databases_to_remove)
+
+```
+
+
+# Results
+
+## Finding our LR interactions of interest in the filtered database from OmniPath
+
+```{r Finding interactions in intercell db}
+
+intercell_refs = nichenet_refs %>%
+  rename(database_NN = "database", source_NN = "source") %>%
+  left_join(intercell_network_filt, by = join_by(from == source_genesymbol, to == target_genesymbol)) %>%
+  arrange(from)
+
+```
+
+
+### Table of OmniPath info for LR interactions of interest (wide)
+
+Write this as a table in case we want to view it in Excel or something.
+
+```{r Write table to file}
+
+write.table(
+  intercell_refs,
+  file = paste0(proj_long, "/sankey_inferredLT/Up_in_Stretched_Top1to10-ligands-byLog2FC_all-LRlinks_all-LTlinks_Table_InferredLTPaths_LR-DataSources_OmniPath_V4.csv"),
+  row.names = FALSE, quote = FALSE, sep = ",")
+
+```
+
+#################
+
+# Looking at targets
+```{r}
+
+# infiles = list.files(
+#   path = paste0(proj_long, "/ligand-target_results/V4/"),
+#   pattern = '*_Top1to10_ligands_byLog2FC_V4.csv',
+#   full.names = TRUE
+# )
+
+# all_lt_links = data.frame(
+#   ligand = character(),
+#   target = character()
+# )
+
+# # for (file in infiles) {
+# #   celltype_lt_links = read.table(file = file, sep = ",", header = TRUE)    
+# #   all_lt_links = bind_rows(active_ligand_target_links_network_df, celltype_lt_links)
+# # }
+
+# ligand_target = all_lt_links %>% distinct(ligand, target, .keep_all = FALSE) %>%
+#   dplyr::filter(target %in% interactions_oi$to) %>%
+#   dplyr::filter(ligand %in% interactions_oi$from) %>%
+#   left_join(sig_network, by = join_by(ligand == from, target == to), relationship = "one-to-many")
+  
+# interactions_oi %>%
+#   dplyr::filter(from %in% lr_network$to) %>%
+#   dplyr::select(from, to) %>%
+#   distinct() %>%
+#   left_join(weighted_networks$lr_sig, by = join_by(from, to), relationship = "one-to-many")
+  
+receptor_target_sig = interactions_oi %>%
+  dplyr::select(-c('cell_type')) %>%
+  distinct(from, to, .keep_all = FALSE) %>%
+  left_join(lr_network, relationship = "one-to-many") %>%
+  dplyr::filter(is.na(database)) %>%
+  dplyr::select(from, to) %>%
+  left_join(sig_network, by = join_by(from, to), relationship = "one-to-many")
+
+receptor_target_gr = receptor_target_sig %>%
+  dplyr::filter(is.na(database)) %>%
+  dplyr::select(from, to) %>%
+  left_join(gr_network, by = join_by(from, to), relationship = "one-to-many")
+
+receptor_target_refs = bind_rows(
+  receptor_target_sig %>% dplyr::filter(!is.na(database)),
+  receptor_target_gr
+  )
+
+write.table(
+  receptor_target_refs,
+  file = paste0(proj_long, "/sankey_inferredLT/Up_in_Stretched_Top1to10-ligands-byLog2FC_all-LRlinks_all-LTlinks_Table_InferredLTPaths_LT-DataSources_V4.csv"),
+  row.names = FALSE, quote = FALSE, sep = ",")
+
+
+```
