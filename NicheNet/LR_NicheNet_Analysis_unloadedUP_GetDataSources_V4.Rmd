@@ -37,6 +37,11 @@ interactions_oi = read_tsv(
     proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
     "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
 )
+
+nichenet_refs = interactions_oi %>% dplyr::select(-c('cell_type')) %>% distinct(from, to, .keep_all = FALSE) %>%
+  left_join(lr_network, relationship = "many-to-many") %>%
+  dplyr::filter(!is.na(database))
+  
 ```
 
 
