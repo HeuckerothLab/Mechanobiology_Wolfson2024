@@ -1082,8 +1082,23 @@ run_lrt_sankey_setup = function(receiver_cell_types_list, ligand_file_label, plo
 selected_cell_types = receiver_cell_types_custom[c(1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 14)] %>% sort()
 selected_cell_types
 
+# selected_cell_types
+#  [1] "Epithelial"    "Fibroblast_1"  "Fibroblast_2"  "Glia"          "ICCs"          "Macrophage"    "Neuron"        "Vascular"      "VascularSMC"   "VisceralSMC_1" "VisceralSMC_2"
 
+# TOP 1 TO 10
 sankey_Top1to10 = run_lrt_sankey_setup(selected_cell_types, "Top1to10", 1000)
+
+# Output the table of results
+write.table(
+  sankey_Top1to10[[1]],
+  file = paste0(
+    outdir, "sankey_inferredLT/",
+    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv"),
+    quote = FALSE,
+    row.names = FALSE,
+    sep = '\t'
+)
 
 onRender(sankey_Top1to10[[2]],
          '
@@ -1131,8 +1146,19 @@ webshot::webshot(paste0(outdir, "sankey_inferredLT/",
 
 
 
-
+# TOP 11 TO 20
 sankey_Top11to20 = run_lrt_sankey_setup(selected_cell_types, "Top11to20", 1500)
+
+write.table(
+  sankey_Top11to20[[1]],
+  file = paste0(
+    outdir, "sankey_inferredLT/",
+    proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv"),
+    quote = FALSE,
+    row.names = FALSE,
+    sep = '\t'
+)
 
 onRender(sankey_Top11to20[[2]],
          '
