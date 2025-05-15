@@ -12,38 +12,12 @@ This can be run after `Up_in_Unstretched/scripts/LR_NicheNet_Analysis_unloadedUP
 ```{r Packages}
 # Utility
 library(tidyverse)
+library(data.table)
 
 # Analysis
 library(nichenetr)
 library(OmnipathR)
 ```
-
-
-```{r Project information}
-proj = "unloaded"
-proj_long = "Up_in_Unstretched"
-
-# For Unstretched, we reported the top 1 to 10 ligands.
-top_gene_lab = 'Top1to10'
-
-version = "V4"
-```
-
-# Define a table of **ligand-receptor interactions of interest** that we want to get evidence for
-```{r Interactions to find evidence for}
-interactions_oi = read_tsv(
-    file = paste0(
-    proj_long, "/sankey_inferredLT/",
-    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
-    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
-)
-
-nichenet_refs = interactions_oi %>% dplyr::select(-c('cell_type')) %>% distinct(from, to, .keep_all = FALSE) %>%
-  left_join(lr_network, relationship = "many-to-many") %>%
-  dplyr::filter(!is.na(database))
-  
-```
-
 
 # Load in the modified model (after generating these files from `Up_in_Unstretched/scripts/LR_NicheNet_Analysis_unloadedUP_V4.Rmd`)
 
@@ -360,6 +334,10 @@ all_omnipath_complex = seq(nrow(all_omnipath_complex)) %>% lapply(function(row_i
 
 all_omnipath = all_omnipath %>% bind_rows(all_omnipath_complex %>% select(-complex)) 
 
+#### ## ## ## ## ## ##  Query the Omnipath interaction network or ligands and receptors
+
+# all_omnipath_lr = all_omnipath %>% filter(source_genesymbol %in% possible_ligands_no_intracellular & target_genesymbol %in% possible_receptors_no_intracellular) %>% distinct(source_genesymbol, target_genesymbol, curation_effort, sources) %>% group_by(source_genesymbol, target_genesymbol) %>% top_n(1, curation_effort) %>% ungroup() ## I think this will be a good lr network
+
 ```
 
 # ####################################################################################################################################################
@@ -369,6 +347,33 @@ all_omnipath = all_omnipath %>% bind_rows(all_omnipath_complex %>% select(-compl
 # ################################ !!!!!!!!!!!!!!!!!!!! END OF CODE FROM NICHENET !!!!!!!!!!!!!!!!!!!! ###############################################
 
 
+# Load in data for this project 
+
+```{r Project information}
+proj = "unloaded"
+proj_long = "Up_in_Unstretched"
+
+# For Unstretched, we reported the top 1 to 10 ligands.
+top_gene_lab = 'Top1to10'
+
+version = "V4"
+```
+
+# Define a table of **ligand-receptor interactions of interest** that we want to get evidence for
+```{r Interactions to find evidence for}
+interactions_oi = read_tsv(
+    file = paste0(
+    proj_long, "/sankey_inferredLT/",
+    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
+)
+
+nichenet_refs = interactions_oi %>% dplyr::select(-c('cell_type')) %>% distinct(from, to, .keep_all = FALSE) %>%
+  left_join(lr_network, relationship = "many-to-many") %>%
+  dplyr::filter(!is.na(database))
+
+```
+
 
 # Table of OmniPath info for LR interactions of interest (wide)
 
@@ -376,17 +381,21 @@ Write this as a table.
 
 ```{r Write table to file}
 
-#### ## ## ## ## ## ##  Query the Omnipath interaction network or ligands and receptors
-
-# Original code from NciheNet had this:
-# all_omnipath_lr = all_omnipath %>% filter(source_genesymbol %in% possible_ligands_no_intracellular & target_genesymbol %in% possible_receptors_no_intracellular) %>% distinct(source_genesymbol, target_genesymbol, curation_effort, sources) %>% group_by(source_genesymbol, target_genesymbol) %>% top_n(1, curation_effort) %>% ungroup() ## I think this will be a good lr network
-
-# I (beigelk) have modified it to this in order to keep the sources in the full table:
-all_omnipath_lr = all_omnipath %>% filter(source_genesymbol %in% possible_ligands_no_intracellular & target_genesymbol %in% possible_receptors_no_intracellular)
+# beigelk's version, to keep info we want
+all_omnipath_lr = all_omnipath %>% filter(source_genesymbol %in% possible_ligands_no_intracellular & target_genesymbol %in% possible_receptors_no_intracellular) 
 
 nichenet_sources = all_omnipath_lr %>%
   filter(source_genesymbol %in% nichenet_refs$from) %>%
-  filter(target_genesymbol %in% nichenet_refs$to)
+  filter(target_genesymbol %in% nichenet_refs$to) %>%
+  # dplyr::select(source_genesymbol, target_genesymbol, source, target, sources, references) %>%
+  dplyr::select(source_genesymbol, target_genesymbol, sources, references) %>%
+  dplyr::rename(
+    ligand_genesymbol = source_genesymbol,
+    receptor_genesymbol = target_genesymbol,
+    # ligand_omnipath_uniprot_id = source,
+    # receptor_omnipath_uniprot_id = target
+  ) %>%
+  arrange(ligand_genesymbol, receptor_genesymbol)
 
 # write.table(
 #   nichenet_sources,
@@ -423,7 +432,12 @@ receptor_target_gr = receptor_target_sig %>%
 receptor_target_refs = bind_rows(
   receptor_target_sig %>% dplyr::filter(!is.na(database)),
   receptor_target_gr
-  )
+  ) %>%
+  dplyr::rename(
+    receptor = from,
+    target = to
+  ) %>%
+  arrange(receptor, target)
 
 # write.table(
 #   receptor_target_refs,
@@ -433,7 +447,7 @@ receptor_target_refs = bind_rows(
 
 fwrite(
   receptor_target_refs,
-  file = paste0(proj_long, "/sankey_inferredLT/", proj_long, "_RT-DataSources_", top_gene_lab, "-ligands_V4.csv"),
-  row.names = FALSE, quote = FALSE, sep = ","
+  file = paste0(proj_long, "/sankey_inferredLT/", proj_long, "_RT-DataSources_", top_gene_lab, "-ligands_V4.tsv"),
+  row.names = FALSE, quote = FALSE, sep = "\t"
 )
 ```
