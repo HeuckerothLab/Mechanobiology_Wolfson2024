@@ -47,6 +47,10 @@ interactions_oi_11to20 = read_tsv(
 )
 
 interactions_oi = bind_rows(interactions_oi_1to10, interactions_oi_11to20)
+
+nichenet_refs = interactions_oi %>% dplyr::select(-c('cell_type')) %>% distinct(from, to, .keep_all = FALSE) %>%
+  left_join(lr_network, relationship = "many-to-many") %>%
+  dplyr::filter(!is.na(database))
 ```
 
 
