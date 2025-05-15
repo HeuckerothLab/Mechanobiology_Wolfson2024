@@ -12,6 +12,7 @@ This can be run after `Up_in_Stretched/scripts/LR_NicheNet_Analysis_loadedUP_V4.
 ```{r Packages}
 # Utility
 library(tidyverse)
+library(data.table)
 
 # Analysis
 library(nichenetr)
@@ -23,12 +24,35 @@ library(OmnipathR)
 proj = "loaded"
 proj_long = "Up_in_Stretched"
 
+# For Stretched, we reported the top 1 to 20 ligands.
+top_gene_lab = 'Top1to20'
+
 version = "V4"
 ```
 
-## Load in the modified model (after generating these files from `Up_in_Stretched/scripts/LR_NicheNet_Analysis_loadedUP_V4.Rmd`)
+# Define a table of **ligand-receptor interactions of interest** that we want to get evidence for.
+```{r Interactions to find evidence for}
+interactions_oi_1to10 = read_tsv(
+    file = paste0(
+    proj_long, "/sankey_inferredLT/",
+    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
+)
 
-### Data sources in the NicheNet prior model
+interactions_oi_11to20 = read_tsv(
+    file = paste0(
+    proj_long, "/sankey_inferredLT/",
+    proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
+)
+
+interactions_oi = bind_rows(interactions_oi_1to10, interactions_oi_11to20)
+```
+
+
+# Load in the modified model (after generating these files from `Up_in_Stretched/scripts/LR_NicheNet_Analysis_loadedUP_V4.Rmd`)
+
+## Data sources in the NicheNet prior model
 
 There are two main parts of how ligand-receptor interactions are defined in the NicheNet model: the ligand-receptor network (`lr_network`), which is used to screen the data for LR interactions, and the signaling network (`sig_network`) which is used to construct the weights for the ligand-receptor interactions.
 
@@ -55,158 +79,339 @@ weighted_networks_lr = weighted_networks$lr_sig %>%
 ```
 
 
-## Define a table of **ligand-receptor interactions of interest** that we want to get evidence for
-```{r Interactions to find evidence for}
-interactions_oi = read_tsv(
-    file = paste0(
-    proj_long, "/sankey_inferredLT/",
-    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
-    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv")
+# ################################ !!!!!!!!!!!!!!!!!!!! CODE FROM NICHENET BELOW !!!!!!!!!!!!!!!!!!!! ################################################
+
+# ####################################################################################################################################################
+# ####################################################################################################################################################
+# ####################################################################################################################################################
+# THIS CODE COMES FROM NICHENET -- WE NEED TO USE THIS TO PRODUCE THE ORIGINAL TABLE FOR THE LR_NETWORK THAT CONTAINS THE SOURCES
+
+This following block of code is pulled from the NicheNet model v2 construction scripts from the NicheNet authors, from Zenodo record: https://zenodo.org/records/8016880 
+- Code in the following chunk is from the file: `NicheNet_V2/networks/scripts/ligand_receptor/3-make_new_LR_network_omnipath.R` at https://zenodo.org/records/8016880
+
+I have made on modification in this code, which is how `lr_network_nichenet` is defined (I want to use my version of the lr_network)
+
+```{r NicheNet_V2/networks/scripts/ligand_receptor/3-make_new_LR_network_omnipath.R}
+
+######################################################################################################################################################
+
+### Strategy: focus on the bona fide ligands and receptors etc; step 2 and then look in the Omnipath interaction collection whether we can find links between those
+
+######################################################################################################################################################
+
+
+######################################################################################################################################################
+
+### Step 0: Define functions that will be used later on
+
+######################################################################################################################################################
+
+
+mutate_cond <- function(.data, condition, ..., envir = parent.frame()) {
+  condition <- eval(substitute(condition), .data, envir)
+  .data[condition, ] <- .data[condition, ] %>% mutate(...)
+  .data
+}
+
+get_ligands_receptors_annotations = function(all_annotations){
+  ############  start by getting all intercellular communication annotations ############  
+  
+  ############ define ligands and receivers, aka transmitters and receivers in omnipath language  ############  
+  
+  all_ligands = all_annotations %>% filter(transmitter == TRUE & entity_type != "complex") %>% pull(genesymbol) %>% unique()
+  all_receptors = all_annotations %>% filter(receiver == TRUE & entity_type != "complex") %>% pull(genesymbol) %>% unique()
+  
+  #### define orphan ligands: #### 
+  ## orphan ligands: secreted proteins that are not receivers, but are not annotated as transmitter
+  ## often case if some data sources don't include them in that way, like NAMPT in ConnectomeDB 2020
+  ## to be sure they are secreted: filter out proteins that are more more likely to be intracellular than secreted
+  intracellular_ligands_receptors = all_annotations %>% filter(aspect == "locational") %>% group_by(genesymbol) %>% top_n(1, consensus_score) %>% filter(parent == "intracellular") %>% pull(genesymbol) %>% unique()
+  orphan_ligands = all_annotations %>% filter(secreted == TRUE & entity_type != "complex") %>% pull(genesymbol) %>% 
+    setdiff(intracellular_ligands_receptors) %>% sort() %>% 
+    setdiff(all_annotations %>% filter(transmitter == TRUE & entity_type != "complex") %>% pull(genesymbol))
+  
+  ######## filter out transmitters that are more likely to be receivers -- and vice versa -- ######## 
+  ## start by defining bona fide transmitters and receivers, and proteins that can be both
+  
+  transmitter_only = all_annotations %>% filter(transmitter == TRUE & entity_type != "complex") %>% pull(genesymbol) %>% setdiff(
+    all_annotations %>% filter(receiver == TRUE & entity_type != "complex") %>% pull(genesymbol)
+  ) %>% unique() ## note: these are not all trustworthy!!
+  
+  receiver_only = all_annotations %>% filter(receiver == TRUE & entity_type != "complex") %>% pull(genesymbol) %>% setdiff(
+    all_annotations %>% filter(transmitter == TRUE & entity_type != "complex") %>% pull(genesymbol)
+  ) %>% unique()
+  
+  transmitter_receiver = all_annotations %>% filter(receiver == TRUE & entity_type != "complex") %>% pull(genesymbol) %>% intersect(
+    all_annotations %>% filter(transmitter == TRUE & entity_type != "complex") %>% pull(genesymbol)
+  ) %>% unique()
+  
+  # determine now the consensus score of each protein to be transmitter, receiver, or both
+  transmitter_receiver_df_score_transmitter = all_annotations %>% filter(genesymbol %in% transmitter_receiver) %>% distinct(genesymbol, transmitter, receiver, consensus_score) %>% filter(transmitter == TRUE & receiver == FALSE) %>% group_by(genesymbol) %>% top_n(1, consensus_score) %>% select(genesymbol, consensus_score) %>% rename(consensus_score_transmitter = consensus_score) %>% ungroup()
+  transmitter_receiver_df_score_receiver = all_annotations %>% filter(genesymbol %in% transmitter_receiver) %>% distinct(genesymbol, transmitter, receiver, consensus_score) %>% filter(transmitter == FALSE & receiver == TRUE) %>% group_by(genesymbol) %>% top_n(1, consensus_score) %>% select(genesymbol, consensus_score) %>% rename(consensus_score_receiver = consensus_score) %>% ungroup()
+  transmitter_receiver_df_score_transmitter_receiver = all_annotations %>% filter(genesymbol %in% transmitter_receiver) %>% distinct(genesymbol, transmitter, receiver, consensus_score) %>% filter(transmitter == TRUE & receiver == TRUE) %>% group_by(genesymbol) %>% top_n(1, consensus_score) %>% select(genesymbol, consensus_score) %>% rename(consensus_score_transmitter_receiver = consensus_score) %>% ungroup()
+  
+  transmitter_receiver_df = transmitter_receiver_df_score_transmitter %>% full_join(transmitter_receiver_df_score_receiver) %>% full_join(transmitter_receiver_df_score_transmitter_receiver)
+  
+  transmitter_receiver_df = transmitter_receiver_df %>% 
+    mutate_cond(is.na(consensus_score_transmitter), consensus_score_transmitter = 0) %>% 
+    mutate_cond(is.na(consensus_score_receiver), consensus_score_receiver = 0) %>% 
+    mutate_cond(is.na(consensus_score_transmitter_receiver), consensus_score_transmitter_receiver = 0)
+  transmitter_receiver_df = transmitter_receiver_df %>% drop_na() %>% filter(consensus_score_transmitter > 0 | consensus_score_receiver > 0 |  consensus_score_transmitter_receiver > 0)
+  
+  # filter out proteins that are more likely transmitter than other
+  transmitter_only_2 = transmitter_receiver_df %>% filter(consensus_score_transmitter > (consensus_score_receiver + 1) & consensus_score_transmitter > (consensus_score_transmitter_receiver + 1) ) %>% pull(genesymbol)
+  
+  # filter out proteins that are more likely receiver than other
+  receiver_only_2 = transmitter_receiver_df %>% filter(consensus_score_receiver > (consensus_score_transmitter + 1) & consensus_score_receiver > (consensus_score_transmitter_receiver + 1) )  %>% pull(genesymbol)
+  
+  # filter out proteins that are more likely both transmitter and receiver 
+  transmitter_receiver_2 = transmitter_receiver_df %>% filter(! genesymbol %in% union(transmitter_only_2, receiver_only_2)) %>% pull(genesymbol)
+  
+  ####### now get list of potential ligands and receptors based on the previous analyses ####### 
+  
+  possible_ligands = c(transmitter_only, transmitter_only_2, transmitter_receiver_2, orphan_ligands) %>% unique()
+  possible_receptors = c(receiver_only, receiver_only_2, transmitter_receiver_2) %>% unique()
+  return(list(ligands = possible_ligands, receptors = possible_receptors) )
+}
+
+get_ligands_receptors_ligrec = function(ligrec){
+  # filter out the complexes
+  ligrec = ligrec %>% filter(!(entity_type_intercell_source == "complex" |
+                                 entity_type_intercell_target == "complex"))
+  ligrec_filtered = ligrec %>% filter(sources != "Wang") %>% 
+    filter(category_intercell_source %in% c("ligand","cell_adhesion","cell_surface_ligand", "secreted","interleukins_hgnc", "chemokine_ligands_hgnc", "endogenous_ligands_hgnc","surface_ligand", "secreted_enzyme") & category_intercell_target %in% c("receptor","cell_adhesion","interleukin_receptors_hgnc")) 
+  
+  ligrec_filtered = ligrec_filtered %>% filter(!database_intercell_source %in% c("Omnipath","LRdb;OmniPath","GO_Intercell;OmniPath","scConnect;OmniPath","Cellinker;OmniPath","Cellinker;scConnect;OmniPath","Cellinker;Zhong2015;OmniPath") & !database_intercell_target %in% c("Omnipath","LRdb;OmniPath","GO_Intercell;OmniPath","scConnect;OmniPath","Cellinker;OmniPath","Cellinker;scConnect;OmniPath","Cellinker;Zhong2015;OmniPath"))
+  
+  trustworthy_sources_a = ligrec_filtered  %>%
+    filter(consensus_score_intercell_source > 1) %>% pull(source_genesymbol) %>% unique()
+  
+  trustworthy_targets_a = ligrec_filtered %>% 
+    filter(consensus_score_intercell_target > 1) %>% pull(target_genesymbol) %>% unique()
+  
+  # are there ligands/receptors that have only a score of <= 2 for one rol, but 0/1 for the other role?
+  source_df = ligrec_filtered %>% 
+    select(source_genesymbol, consensus_score_intercell_source) %>% rename(gene = source_genesymbol, score_source = consensus_score_intercell_source)
+  target_df = ligrec_filtered %>% 
+    select(target_genesymbol, consensus_score_intercell_target) %>% rename(gene = target_genesymbol, score_target = consensus_score_intercell_target)
+  
+  gene_df = source_df %>% full_join(target_df) %>% mutate_cond(is.na(score_source), score_source = 0) %>% mutate_cond(is.na(score_target), score_target = 0) %>% mutate(diff = score_source - score_target, summation = score_source + score_target) %>% distinct() # inner join maybe not ideal -- some lgiands and receptors were unique ligands and receptors
+  gene_df = gene_df %>% group_by(gene) %>% top_n(1, summation) %>% distinct() %>% ungroup() ## this was a crucial thing!
+  
+  dubious_sources_targets = gene_df  %>% filter(score_source == score_target) %>% pull(gene) %>% unique() %>% sort()
+  
+  dubious_sources = gene_df %>% filter(diff == 1) %>% pull(gene) %>% setdiff(trustworthy_sources_a) %>% sort()
+  dubious_targets = gene_df %>% filter(diff == -1) %>% pull(gene) %>% setdiff(trustworthy_targets_a) %>% sort()
+  
+  # far from perfect now, but at least we have something useful and filtered out the biggest shit
+  ligrec_filtered = ligrec_filtered %>% filter(source_genesymbol %in% c(trustworthy_sources_a, dubious_sources_targets, dubious_sources) & target_genesymbol %in% c(trustworthy_targets_a, dubious_sources_targets, dubious_targets))
+  
+  possible_ligands = c(trustworthy_sources_a, dubious_sources_targets, dubious_sources) %>% unique()
+  possible_receptors = c(trustworthy_targets_a, dubious_sources_targets, dubious_targets) %>% unique()
+  
+  return(list(ligands = possible_ligands, receptors = possible_receptors) )
+  
+}
+
+## test function to demonstrate we really have to include these filters
+get_ligands_receptors_ligrec_bad = function(ligrec){
+  # filter out the complexes
+  ligrec = ligrec %>% filter(!(entity_type_intercell_source == "complex" |
+                                 entity_type_intercell_target == "complex"))
+  ligrec_filtered = ligrec %>% 
+    filter(category_intercell_source %in% c("ligand","cell_adhesion","cell_surface_ligand", "secreted","interleukins_hgnc", "chemokine_ligands_hgnc", "endogenous_ligands_hgnc","surface_ligand", "secreted_enzyme") & category_intercell_target %in% c("receptor","cell_adhesion","interleukin_receptors_hgnc")) 
+  
+  trustworthy_sources_a = ligrec_filtered  %>%
+    filter(consensus_score_intercell_source > 1) %>% pull(source_genesymbol) %>% unique()
+  
+  trustworthy_targets_a = ligrec_filtered %>% 
+    filter(consensus_score_intercell_target > 1) %>% pull(target_genesymbol) %>% unique()
+  
+  # are there ligands/receptors that have only a score of <= 2 for one rol, but 0/1 for the other role?
+  source_df = ligrec_filtered %>% 
+    select(source_genesymbol, consensus_score_intercell_source) %>% rename(gene = source_genesymbol, score_source = consensus_score_intercell_source)
+  target_df = ligrec_filtered %>% 
+    select(target_genesymbol, consensus_score_intercell_target) %>% rename(gene = target_genesymbol, score_target = consensus_score_intercell_target)
+  
+  gene_df = source_df %>% full_join(target_df) %>% mutate_cond(is.na(score_source), score_source = 0) %>% mutate_cond(is.na(score_target), score_target = 0) %>% mutate(diff = score_source - score_target, summation = score_source + score_target) %>% distinct() # inner join maybe not ideal -- some lgiands and receptors were unique ligands and receptors
+  gene_df = gene_df %>% group_by(gene) %>% top_n(1, summation) %>% distinct() %>% ungroup() ## this was a crucial thing!
+  
+  dubious_sources_targets = gene_df  %>% filter(score_source == score_target) %>% pull(gene) %>% unique() %>% sort()
+  
+  dubious_sources = gene_df %>% filter(diff == 1) %>% pull(gene) %>% setdiff(trustworthy_sources_a) %>% sort()
+  dubious_targets = gene_df %>% filter(diff == -1) %>% pull(gene) %>% setdiff(trustworthy_targets_a) %>% sort()
+  
+  # far from perfect now, but at least we have something useful and filtered out the biggest shit
+  ligrec_filtered = ligrec_filtered %>% filter(source_genesymbol %in% c(trustworthy_sources_a, dubious_sources_targets, dubious_sources) & target_genesymbol %in% c(trustworthy_targets_a, dubious_sources_targets, dubious_targets))
+  
+  possible_ligands = c(trustworthy_sources_a, dubious_sources_targets, dubious_sources) %>% unique()
+  possible_receptors = c(trustworthy_targets_a, dubious_sources_targets, dubious_targets) %>% unique()
+  
+  return(list(ligands = possible_ligands, receptors = possible_receptors) )
+  
+}
+
+######################################################################################################################################################
+
+### Step 1: Get confident ligand and receptor annotations
+
+######################################################################################################################################################
+
+
+### step 1A: get ligands and receptors based on annotations in the Intercell Database of Omnipath
+all_annotations = import_omnipath_intercell()
+ligands_receptors_test = get_ligands_receptors_annotations(all_annotations) 
+
+## some bad receiver-transmitter annotations -- therefore filter out
+all_annotations = all_annotations %>% setdiff(
+  all_annotations %>% filter(aspect == "functional" & database %in% c("GO_Intercell","OmniPath")) 
 )
-```
+ligands_receptors_1 = get_ligands_receptors_annotations(all_annotations) # much better
 
+# check which bad ligands and receptors we removed now
+ligands_receptors_test$ligands %>% setdiff(ligands_receptors_1$ligands) %>% sort() # TRAF4, ACTA1, CDK4, CCND1
+ligands_receptors_test$receptors %>% setdiff(ligands_receptors_1$receptors) %>% sort() # C3 and CCND1
 
-### Loading the OmniPath databases
-```{r Load OmniPath resources}
+### step 1B: get ligands and receptors based on interactions in the Omnipath LR network
+omnipath_broad = OmnipathR::import_intercell_network(omnipath = TRUE, ligrecextra = TRUE)
+ligands_receptors_2 = get_ligands_receptors_ligrec(omnipath_broad)
+ligands_receptors_bad = get_ligands_receptors_ligrec_bad(omnipath_broad)
 
-nichenet_refs = interactions_oi %>% dplyr::select(-c('cell_type')) %>% distinct(from, to, .keep_all = FALSE) %>%
-  left_join(lr_network, relationship = "many-to-many") %>%
-  dplyr::filter(!is.na(database))
+possible_ligands = union(ligands_receptors_1$ligands, ligands_receptors_2$ligands)
+possible_receptors = union(ligands_receptors_1$receptors, ligands_receptors_1$receptors)
 
-db_to_keep = get_intercell_resources()[(!get_intercell_resources() %in% c("OmniPath", "GO_Intercell"))]
+# check which ligands/receptors would be missed if not including both
+ligands_receptors_2$ligands %>% setdiff(ligands_receptors_1$ligands) %>% sort() # BTLA, CD226, CD80, CD86, CXCL16, DPP4, EPHA4, IFNA13, PVR
+ligands_receptors_1$ligands %>% setdiff(ligands_receptors_2$ligands) %>% sort() # IFNA1, FN1, 
 
-# Omnipath intercell database
-omnipath_intercell = import_omnipath_intercell(
-  resources = db_to_keep,
+ligands_receptors_2$receptors %>% setdiff(ligands_receptors_1$receptors) %>% sort() # ICAM1, VCAM1
+ligands_receptors_1$receptors %>% setdiff(ligands_receptors_2$receptors) %>% sort() # C3AR1
+
+ligands_receptors_bad$ligands %>% setdiff(ligands_receptors_2$ligands) %>% sort() #JAK2, NOTCH1, PIK3CA, TP53
+ligands_receptors_bad$receptors %>% setdiff(ligands_receptors_2$receptors) %>% sort() # JAK2, CX3CL1, CXCL16
+
+### step1C: filter out transmitters that are more likely to be intracellular than extracellular than plasma membrane
+# get intracellular ligands
+
+intracellular_score_df = all_annotations %>% filter(genesymbol %in% c(possible_ligands, possible_receptors) & aspect == "locational") %>% distinct(genesymbol, parent, consensus_score) %>% filter(parent == "intracellular") %>% rename(score_intracellular = consensus_score) %>% group_by(genesymbol) %>% top_n(1, score_intracellular) %>% ungroup() %>% select(-parent) %>% distinct() 
+other_location_score_df = all_annotations %>% filter(genesymbol %in% c(possible_ligands, possible_receptors) & aspect == "locational") %>% distinct(genesymbol, parent, consensus_score) %>% filter(parent != "intracellular") %>% rename(score_other = consensus_score) %>% group_by(genesymbol) %>% top_n(1, score_other)  %>% ungroup() %>% select(-parent) %>% distinct()
+
+location_ligand_df = intracellular_score_df %>% full_join(other_location_score_df) 
+
+location_ligand_df = location_ligand_df %>% 
+  mutate_cond(is.na(score_intracellular), score_intracellular = 0) %>% 
+  mutate_cond(is.na(score_other), score_other = 0) 
+location_ligand_df = location_ligand_df %>% drop_na() %>% filter(score_intracellular > 0 | score_other > 0)
+
+intracellular_ligands = location_ligand_df %>% filter(score_intracellular  >= (score_other) ) %>% pull(genesymbol) %>% intersect(possible_ligands) %>% sort() # many shit is removed indeed
+intracellular_receptors = location_ligand_df %>% filter(score_intracellular  >= (score_other) ) %>% pull(genesymbol) %>% intersect(possible_receptors) %>% sort()# many shit is removed indeed
+intracellular_ligands # ARF1, IRF8, MYH9, SOCS2
+# "FGF11"          "FGF12"          "FGF14": not-shit?
+possible_ligands_no_intracellular = possible_ligands %>% setdiff(intracellular_ligands) %>% setdiff(intracellular_receptors) %>% sort()
+possible_receptors_no_intracellular = possible_receptors %>% setdiff(intracellular_receptors) %>% setdiff(intracellular_ligands) %>% sort()
+
+#### step1D:  add the GO intercell ligand active to the set of ligands
+all_annotations = import_omnipath_intercell()
+GO_intercell_ligands =  all_annotations %>% filter(database == "GO_Intercell" & category == "ligand") %>% pull(genesymbol) %>% sort() ## to add to the list of ligands later on! The ones that are here, but also intracellular: give more importance to this!
+GO_intercell_ligands %>% setdiff(possible_ligands_no_intracellular)
+possible_ligands_no_intracellular = possible_ligands_no_intracellular %>% union(GO_intercell_ligands)
+
+# useful analysis: compare with old nichenet ligands
+# lr_network_nichenet = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds")) # [beigelk] removing this so I can use my modified NicheNet model
+# lr_network_nichenet = lr_network_nichenet %>% convert_alias2symbols_network_human(geneinfo_human) # [beigelk] removing this so I can use my modified NicheNet model
+lr_network_nichenet = lr_network
+nichenet_only_ligands = lr_network_nichenet$from %>% setdiff(possible_ligands_no_intracellular) %>% setdiff(possible_receptors_no_intracellular)  %>% unique() %>% sort() 
+nichenet_only_receptors = lr_network_nichenet$to %>% setdiff(possible_receptors_no_intracellular) %>% setdiff(possible_ligands_no_intracellular)  %>% unique() %>% sort() 
+
+nichenet_only_ligands # all the bad ones!: very good we were able to filter them out!
+
+# useful analysis: compare with "problematic" ligands for which annotations and interactions were not always present or correct without the filtering steps described above
+ligands_test = c("IFNA1", "CXCL16","TIGIT","NECTIN2", "PVR","NECTIN4", "CD226", "NOTCH1","IL4R","FYK","FYN","YBX1","HMGB1","HMGB2","LGALS1","NAMPT","FGF12","FGF14", "FGF11","CCN3","YARS","YARS1", "CXCR6")
+
+possible_ligands_no_intracellular %>% intersect(ligands_test)
+possible_receptors_no_intracellular %>% intersect(ligands_test)
+
+intracellular_ligands %>% intersect(ligands_test)
+intracellular_receptors  %>% intersect(ligands_test)
+
+######################################################################################################################################################
+
+### Step 2: Query Omnipath interactions for interactions between defined ligands and receptors
+
+######################################################################################################################################################
+
+#### ## ## ## ## ## ##  Get the Omnipath interaction network
+all_omnipath = import_omnipath_interactions(
+  resources = NULL,
   organism = 9606,
+  datasets = c("omnipath","ligrecextra","pathwayextra"),
   fields = NULL,
   default_fields = TRUE,
   references_by_resource = TRUE,
-  exclude = NULL,
-  strict_evidences = FALSE
+  exclude = "Wang"
 )
 
-# additional OmniPath annotations for the genes of interest
-omnipath_annotations = import_omnipath_annotations(
-  proteins = c(unique(nichenet_refs$from), unique(nichenet_refs$to)),
-  resources = NULL,
-  wide = FALSE
-)
+## Find interactions with a complex as at least one of the partners -- decomplixfy later
+all_omnipath_complex =  all_omnipath %>% mutate(complex = grepl("COMPLEX",target)) %>% filter(complex == TRUE) 
 
-# get_interaction_resources()
-omnipath_interactions = import_omnipath_interactions(
-  resources = NULL,
-  datasets = c("omnipath", "ligrecextra", "pathwayextra"),
-  organism = 9606,
-  dorothea_levels = c("A", "B"),
-  exclude = "Wang",
-  fields = NULL,
-  default_fields = TRUE,
-  references_by_resource = TRUE,
-  strict_evidences = FALSE
-)
+all_omnipath_complex = seq(nrow(all_omnipath_complex)) %>% lapply(function(row_id, all_omnipath_complex){
+  row = all_omnipath_complex[row_id,]
+  targets = row$target_genesymbol %>% stringr::str_split("_") %>% unlist()
+  tbl_targets = tibble(target_genesymbol = targets, target = row$target)
+  colnames_order = colnames(row)
+  row = row %>% select(-target_genesymbol) %>% inner_join(tbl_targets, by = "target") %>% select(colnames_order)
+  return(row)
+},all_omnipath_complex) %>% bind_rows(all_omnipath_complex) 
+
+all_omnipath = all_omnipath %>% bind_rows(all_omnipath_complex %>% select(-complex)) 
 
 ```
 
-The additional filtering should all be added **here** in the next chunk. For now I have my simplified filtering.
+# ####################################################################################################################################################
+# ####################################################################################################################################################
+# ####################################################################################################################################################
 
-```{r Filter Omnipath database}
-
-omnipath_intercell_ligands = omnipath_intercell %>%
-  filter(transmitter == TRUE)
-
-omnipath_intercell_receptors = omnipath_intercell %>%
-  filter(receiver == TRUE)
-
-intercell_network = import_intercell_network(
-  transmitter_param = list(unique(omnipath_intercell_ligands$genesymbol)),
-  receiver_param = list(unique(omnipath_intercell_receptors$genesymbol)),
-  resources = NULL,
-  organism = 9606,
-  omnipath = TRUE,
-  ligrecextra = TRUE,
-  fields = NULL,
-  default_fields = TRUE,
-  references_by_resource = TRUE,
-  exclude = NULL,
-  strict_evidences = FALSE
-)
-
-# Evidences to keep or remove based on what was done in NicheNet.
-ligand_cats_keep = c("ligand", "cell_adhesion", "cell_surface_ligand", "secreted", "interleukins_hgnc","chemokine_ligands_hgnc", "endogenous_ligands_hgnc", "surface_ligand", "secreted_enzyme")
-receptor_cats_keep = c("receptor", "cell_adhesion", "interleukin_receptors_hgnc")
-sources_to_remove = c("Wang")
-databases_to_remove = c("Omnipath", "LRdb;OmniPath", "GO_Intercell;OmniPath", "scConnect;OmniPath", "Cellinker;OmniPath", "Cellinker;scConnect;OmniPath", "Cellinker;Zhong2015;OmniPath")
-
-intercell_network_filt = intercell_network %>%
-  filter(category_intercell_source %in% ligand_cats_keep) %>%
-  filter(category_intercell_target %in% receptor_cats_keep) %>%
-  filter(!sources %in% sources_to_remove) %>%
-  filter(!database_intercell_source %in% databases_to_remove) %>%
-  filter(!database_intercell_target %in% databases_to_remove)
-
-```
+# ################################ !!!!!!!!!!!!!!!!!!!! END OF CODE FROM NICHENET !!!!!!!!!!!!!!!!!!!! ###############################################
 
 
-# Results
 
-## Finding our LR interactions of interest in the filtered database from OmniPath
+# Table of OmniPath info for LR interactions of interest (wide)
 
-```{r Finding interactions in intercell db}
-
-intercell_refs = nichenet_refs %>%
-  rename(database_NN = "database", source_NN = "source") %>%
-  left_join(intercell_network_filt, by = join_by(from == source_genesymbol, to == target_genesymbol)) %>%
-  arrange(from)
-
-```
-
-
-### Table of OmniPath info for LR interactions of interest (wide)
-
-Write this as a table in case we want to view it in Excel or something.
+Write this as a table.
 
 ```{r Write table to file}
 
-write.table(
-  intercell_refs,
-  file = paste0(proj_long, "/sankey_inferredLT/Up_in_Stretched_Top1to10-ligands-byLog2FC_all-LRlinks_all-LTlinks_Table_InferredLTPaths_LR-DataSources_OmniPath_V4.csv"),
-  row.names = FALSE, quote = FALSE, sep = ",")
+#### ## ## ## ## ## ##  Query the Omnipath interaction network or ligands and receptors
 
+# Original code from NciheNet had this:
+# all_omnipath_lr = all_omnipath %>% filter(source_genesymbol %in% possible_ligands_no_intracellular & target_genesymbol %in% possible_receptors_no_intracellular) %>% distinct(source_genesymbol, target_genesymbol, curation_effort, sources) %>% group_by(source_genesymbol, target_genesymbol) %>% top_n(1, curation_effort) %>% ungroup() ## I think this will be a good lr network
+
+# I (beigelk) have modified it to this in order to keep the sources in the full table:
+all_omnipath_lr = all_omnipath %>% filter(source_genesymbol %in% possible_ligands_no_intracellular & target_genesymbol %in% possible_receptors_no_intracellular)
+
+nichenet_sources = all_omnipath_lr %>%
+  filter(source_genesymbol %in% nichenet_refs$from) %>%
+  filter(target_genesymbol %in% nichenet_refs$to)
+
+# write.table(
+#   nichenet_sources,
+#   file = paste0(proj_long, "/sankey_inferredLT/", proj_long, "_LR-DataSources_OmniPath_Top1to20-ligands-byLog2FC_all-LRlinks_all-LTlinks_Table_InferredLTPaths_V4.csv"),
+#   row.names = FALSE, quote = FALSE, sep = "\t"
+# )
+
+fwrite(
+  nichenet_sources,
+  file = paste0(proj_long, "/sankey_inferredLT/", proj_long, "_LR-DataSources_OmniPath_", top_gene_lab, "-ligands_V4.tsv"),
+  row.names = FALSE, quote = FALSE, sep = "\t"
+)
 ```
 
 #################
 
-# Looking at targets
+# Table of databases for receptor-target interactions
+
 ```{r}
 
-# infiles = list.files(
-#   path = paste0(proj_long, "/ligand-target_results/V4/"),
-#   pattern = '*_Top1to10_ligands_byLog2FC_V4.csv',
-#   full.names = TRUE
-# )
-
-# all_lt_links = data.frame(
-#   ligand = character(),
-#   target = character()
-# )
-
-# # for (file in infiles) {
-# #   celltype_lt_links = read.table(file = file, sep = ",", header = TRUE)    
-# #   all_lt_links = bind_rows(active_ligand_target_links_network_df, celltype_lt_links)
-# # }
-
-# ligand_target = all_lt_links %>% distinct(ligand, target, .keep_all = FALSE) %>%
-#   dplyr::filter(target %in% interactions_oi$to) %>%
-#   dplyr::filter(ligand %in% interactions_oi$from) %>%
-#   left_join(sig_network, by = join_by(ligand == from, target == to), relationship = "one-to-many")
-  
-# interactions_oi %>%
-#   dplyr::filter(from %in% lr_network$to) %>%
-#   dplyr::select(from, to) %>%
-#   distinct() %>%
-#   left_join(weighted_networks$lr_sig, by = join_by(from, to), relationship = "one-to-many")
-  
 receptor_target_sig = interactions_oi %>%
   dplyr::select(-c('cell_type')) %>%
   distinct(from, to, .keep_all = FALSE) %>%
@@ -225,10 +430,15 @@ receptor_target_refs = bind_rows(
   receptor_target_gr
   )
 
-write.table(
+# write.table(
+#   receptor_target_refs,
+#   file = paste0(proj_long, "/sankey_inferredLT/", proj_long, "_RT-DataSources_Top1to10-ligands-byLog2FC_all-LRlinks_all-LTlinks_Table_InferredLTPaths_V4.csv"),
+#   row.names = FALSE, quote = FALSE, sep = ","
+# )
+
+fwrite(
   receptor_target_refs,
-  file = paste0(proj_long, "/sankey_inferredLT/Up_in_Stretched_Top1to10-ligands-byLog2FC_all-LRlinks_all-LTlinks_Table_InferredLTPaths_LT-DataSources_V4.csv"),
-  row.names = FALSE, quote = FALSE, sep = ",")
-
-
+  file = paste0(proj_long, "/sankey_inferredLT/", proj_long, "_RT-DataSources_", top_gene_lab, "-ligands_V4.csv"),
+  row.names = FALSE, quote = FALSE, sep = ","
+)
 ```
