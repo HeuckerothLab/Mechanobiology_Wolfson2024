@@ -1080,10 +1080,22 @@ run_lrt_sankey_setup = function(receiver_cell_types_list, ligand_file_label, plo
 
 # Select only the cell types we are interested in
 selected_cell_types = receiver_cell_types_custom[c(1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 14)] %>% sort()
-selected_cell_types
+# selected_cell_types
+#  [1] "Epithelial"    "Fibroblast_1"  "Fibroblast_2"  "Glia"          "ICCs"          "Macrophage"    "Neuron"        "Vascular"      "VascularSMC"   "VisceralSMC_1" "VisceralSMC_2"
 
-
+# TOP 1 TO 10
 sankey_Top1to10 = run_lrt_sankey_setup(selected_cell_types, "Top1to10", 1000)
+
+write.table(
+  sankey_Top1to10[[1]],
+  file = paste0(
+    outdir, "sankey_inferredLT/",
+    proj_long, "_", "Top1to10", "-ligands-byLog2FC_",
+    "all", "-LRlinks_", "all", "-LTlinks_Table_InferredLTPaths_", version, ".csv"),
+    quote = FALSE,
+    row.names = FALSE,
+    sep = '\t'
+)
 
 onRender(sankey_Top1to10[[2]],
          '
@@ -1129,53 +1141,51 @@ webshot::webshot(paste0(outdir, "sankey_inferredLT/",
                  vwidth = 1000, vheight = 1200)
 
 
+# TOP 11 TO 20 (NOT USED)
+# sankey_Top11to20 = run_lrt_sankey_setup(selected_cell_types, "Top11to20", 1500)
 
+# onRender(sankey_Top11to20[[2]],
+#          '
+#    function(el, x) {
+#     d3.selectAll(".node text").attr("text-anchor", "middle").attr("x", 25);
+#       var sankey = this.sankey;
+#       var path = sankey.link();
+#       var nodes = d3.selectAll(".node");
+#       var link = d3.selectAll(".link");
+#       var width = el.getBoundingClientRect().width;
+#       var height = el.getBoundingClientRect().height;
 
+#     window.dragmove = function(d) {
+#       d3.select(this).attr("transform",
+#         "translate(" + (
+#            d.x = Math.max(0, Math.min(width - d.dx, d3.event.x))
+#             ) + "," + (
+#             d.y = Math.max(0, Math.min(height - d.dy, d3.event.y))
+#           ) + ")");
+#       sankey.relayout();
+#       link.attr("d", path);
+#     };
 
-sankey_Top11to20 = run_lrt_sankey_setup(selected_cell_types, "Top11to20", 1500)
+#     nodes.call(d3.drag()
+#       .subject(function(d) { return d; })
+#       .on("start", function() { this.parentNode.appendChild(this); })
+#       .on("drag", dragmove));
+#   }
+#   '
+# ) %>% saveNetwork(file = paste0(outdir, "sankey_inferredLT/",
+#                                 proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+#                                 "all", "-LRlinks_", "all",
+#                                 "-LTlinks_Sankey_InferredLTPaths_", version, ".html"))
 
-onRender(sankey_Top11to20[[2]],
-         '
-   function(el, x) {
-    d3.selectAll(".node text").attr("text-anchor", "middle").attr("x", 25);
-      var sankey = this.sankey;
-      var path = sankey.link();
-      var nodes = d3.selectAll(".node");
-      var link = d3.selectAll(".link");
-      var width = el.getBoundingClientRect().width;
-      var height = el.getBoundingClientRect().height;
-
-    window.dragmove = function(d) {
-      d3.select(this).attr("transform",
-        "translate(" + (
-           d.x = Math.max(0, Math.min(width - d.dx, d3.event.x))
-            ) + "," + (
-            d.y = Math.max(0, Math.min(height - d.dy, d3.event.y))
-          ) + ")");
-      sankey.relayout();
-      link.attr("d", path);
-    };
-
-    nodes.call(d3.drag()
-      .subject(function(d) { return d; })
-      .on("start", function() { this.parentNode.appendChild(this); })
-      .on("drag", dragmove));
-  }
-  '
-) %>% saveNetwork(file = paste0(outdir, "sankey_inferredLT/",
-                                proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
-                                "all", "-LRlinks_", "all",
-                                "-LTlinks_Sankey_InferredLTPaths_", version, ".html"))
-
-webshot::webshot(paste0(outdir, "sankey_inferredLT/",
-                                proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
-                                "all", "-LRlinks_", "all",
-                                "-LTlinks_Sankey_InferredLTPaths_", version, ".html"),
-                 paste0(outdir, "sankey_inferredLT/",
-                                proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
-                                "all", "-LRlinks_", "all",
-                                "-LTlinks_Sankey_InferredLTPaths_", version, ".pdf"),
-                 vwidth = 1000, vheight = 1200)
+# webshot::webshot(paste0(outdir, "sankey_inferredLT/",
+#                                 proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+#                                 "all", "-LRlinks_", "all",
+#                                 "-LTlinks_Sankey_InferredLTPaths_", version, ".html"),
+#                  paste0(outdir, "sankey_inferredLT/",
+#                                 proj_long, "_", "Top11to20", "-ligands-byLog2FC_",
+#                                 "all", "-LRlinks_", "all",
+#                                 "-LTlinks_Sankey_InferredLTPaths_", version, ".pdf"),
+#                  vwidth = 1000, vheight = 1200)
 
 
 
